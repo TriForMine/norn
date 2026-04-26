@@ -21,8 +21,8 @@ edition = "2021"
 rust-version = "1.78"
 license = "Apache-2.0"
 authors = ["Norn contributors"]
-repository = "https://github.com/example/norn"
-homepage = "https://github.com/example/norn"
+repository = "https://github.com/TriForMine/norn"
+homepage = "https://github.com/TriForMine/norn"
 description = "A modular runtime vulnerability monitor for Linux servers"
 readme = "README.md"
 

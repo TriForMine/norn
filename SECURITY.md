@@ -1,6 +1,6 @@
 # Security Policy
 
-Report security vulnerabilities privately by emailing `security@example.com`. Do not open a public issue for suspected vulnerabilities.
+Report security vulnerabilities privately through GitHub Security Advisories for this repository: `https://github.com/TriForMine/norn/security/advisories/new`. Do not open a public issue for suspected vulnerabilities.
 
 Include:
 
