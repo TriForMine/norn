@@ -67,6 +67,11 @@ impl NornConfig {
         if let Ok(value) = env::var("NORN_RISK_NOTIFY_MINIMUM") {
             self.risk.notify_minimum = parse_risk(&value).unwrap_or(self.risk.notify_minimum);
         }
+        if let Ok(value) = env::var("NORN_RISK_MAX_NOTIFICATIONS_PER_SCAN") {
+            if let Ok(limit) = value.parse::<usize>() {
+                self.risk.max_notifications_per_scan = limit;
+            }
+        }
     }
 }
 
@@ -235,12 +240,15 @@ pub struct RiskConfig {
         deserialize_with = "deserialize_risk_level"
     )]
     pub notify_minimum: RiskLevel,
+    #[serde(default = "default_max_notifications_per_scan")]
+    pub max_notifications_per_scan: usize,
 }
 
 impl Default for RiskConfig {
     fn default() -> Self {
         Self {
             notify_minimum: RiskLevel::High,
+            max_notifications_per_scan: default_max_notifications_per_scan(),
         }
     }
 }
@@ -267,6 +275,10 @@ fn default_notify_minimum() -> RiskLevel {
     RiskLevel::High
 }
 
+fn default_max_notifications_per_scan() -> usize {
+    50
+}
+
 fn deserialize_risk_level<'de, D>(deserializer: D) -> std::result::Result<RiskLevel, D::Error>
 where
     D: Deserializer<'de>,
@@ -285,6 +297,7 @@ mod tests {
         env::set_var("NORN_SERVER_BIND", "127.0.0.1:9000");
         env::set_var("NORN_SCANNER_PARALLELISM", "12");
         env::set_var("NORN_RISK_NOTIFY_MINIMUM", "Critical");
+        env::set_var("NORN_RISK_MAX_NOTIFICATIONS_PER_SCAN", "7");
         let cfg = NornConfig::load_from_str(
             r#"
             [server]
@@ -298,11 +311,13 @@ mod tests {
         env::remove_var("NORN_SERVER_BIND");
         env::remove_var("NORN_SCANNER_PARALLELISM");
         env::remove_var("NORN_RISK_NOTIFY_MINIMUM");
+        env::remove_var("NORN_RISK_MAX_NOTIFICATIONS_PER_SCAN");
 
         assert_eq!(cfg.server.bind, "127.0.0.1:9000");
         assert_eq!(cfg.database.url, "sqlite://./norn.db");
         assert_eq!(cfg.scanner.parallelism(), 12);
         assert_eq!(cfg.risk.notify_minimum, RiskLevel::Critical);
+        assert_eq!(cfg.risk.max_notifications_per_scan, 7);
     }
 
     #[test]

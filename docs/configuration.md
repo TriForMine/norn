@@ -38,7 +38,35 @@ webhook_url = ""
 
 [risk]
 notify_minimum = "High"
+max_notifications_per_scan = 50
 ```
+
+## Summary Labels
+
+The CLI, TUI, API, and dashboard distinguish between runtime inventory categories:
+
+- `Active services`: active systemd service inventory items.
+- `Running containers`: running Docker container inventory items.
+- `Listening ports`: listening TCP/UDP socket inventory items from `ss`.
+- `Publicly bound`: inventory items bound to public addresses such as `0.0.0.0`, `::`, or `*`. This does not guarantee internet reachability because firewalls, reverse proxies, routing, and cloud security groups can still restrict access.
+
+Risk summaries include Critical, High, Medium, Low, and Informational counts so the displayed totals line up with the number of evaluated runtime risk instances.
+
+## Notifications
+
+`risk.notify_minimum` controls the lowest runtime risk level that can create an individual notification.
+
+`risk.max_notifications_per_scan` caps the total Discord messages sent by one scan. If there are more new notification candidates than the cap allows, Norn sends the highest-priority individual notifications first and reserves one message for a scan summary. Set this to `0` to suppress scan notifications without disabling Discord configuration entirely.
+
+## API Limits
+
+`GET /api/vulnerabilities` accepts an optional `limit` query parameter to cap the number of vulnerability summaries returned. This is useful for dashboards and TUIs on hosts with large scan results.
+
+Example:
+
+`GET /api/vulnerabilities?limit=500`
+
+Without `limit`, the endpoint returns all deduplicated vulnerability summaries for the latest completed scan.
 
 ## Fixture Mode
 
@@ -53,3 +81,4 @@ Collectors and the Grype adapter support `fixture_path` fields. This is used by 
 - `NORN_DISCORD_ENABLED`
 - `NORN_DISCORD_WEBHOOK_URL`
 - `NORN_RISK_NOTIFY_MINIMUM`
+- `NORN_RISK_MAX_NOTIFICATIONS_PER_SCAN`

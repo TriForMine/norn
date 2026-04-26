@@ -2,7 +2,7 @@ use std::{net::SocketAddr, path::Path, sync::Arc};
 
 use anyhow::{Context, Result};
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::StatusCode,
     response::{Html, IntoResponse, Response},
     routing::{get, post},
@@ -94,8 +94,20 @@ async fn services(State(state): State<ApiState>) -> ApiResult<Json<serde_json::V
     Ok(Json(json!(state.db.service_summaries()?)))
 }
 
-async fn vulnerabilities(State(state): State<ApiState>) -> ApiResult<Json<serde_json::Value>> {
-    Ok(Json(json!(state.db.vulnerability_summaries()?)))
+#[derive(Debug, Deserialize)]
+struct VulnerabilityQuery {
+    limit: Option<usize>,
+}
+
+async fn vulnerabilities(
+    State(state): State<ApiState>,
+    Query(query): Query<VulnerabilityQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let vulnerabilities = match query.limit {
+        Some(limit) => state.db.vulnerability_summaries_limited(limit)?,
+        None => state.db.vulnerability_summaries()?,
+    };
+    Ok(Json(json!(vulnerabilities)))
 }
 
 async fn scans(State(state): State<ApiState>) -> ApiResult<Json<serde_json::Value>> {

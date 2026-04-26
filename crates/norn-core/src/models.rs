@@ -348,11 +348,13 @@ pub struct ScanRecord {
 pub struct Summary {
     pub running_services: usize,
     pub running_containers: usize,
+    pub listening_ports: usize,
     pub public_services: usize,
     pub critical_risks: usize,
     pub high_risks: usize,
     pub medium_risks: usize,
     pub low_risks: usize,
+    pub informational_risks: usize,
     pub last_scan_time: Option<DateTime<Utc>>,
 }
 

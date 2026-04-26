@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -7,9 +8,9 @@ use std::{
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use norn_core::{
-    Exposure, IgnoredFinding, InventoryItem, InventoryKind, NotificationEvent, RiskEvaluation,
-    RiskLevel, ScanRecord, ScannerError, ServiceSummary, Summary, VulnerabilityFinding,
-    VulnerabilitySummary,
+    Exposure, IgnoredFinding, InventoryItem, InventoryKind, InventorySource, NotificationEvent,
+    RiskEvaluation, RiskLevel, RuntimeStatus, ScanRecord, ScannerError, ServiceSummary, Summary,
+    VulnerabilityFinding, VulnerabilitySummary,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
@@ -70,6 +71,17 @@ impl Database {
             scanner_errors: Vec::new(),
         };
         let conn = self.conn.lock().expect("database mutex poisoned");
+        let superseded_errors = serde_json::to_string(&[ScannerError {
+            scanner: "norn".to_string(),
+            target: "scan".to_string(),
+            message: "Scan was superseded by a newer run before it completed.".to_string(),
+        }])?;
+        conn.execute(
+            "UPDATE scans
+             SET completed_at = ?2, status = 'abandoned', scanner_errors_json = ?3
+             WHERE host = ?1 AND status = 'running'",
+            params![host, now.to_rfc3339(), superseded_errors],
+        )?;
         conn.execute(
             "INSERT INTO hosts (id, name, first_seen, last_seen)
              VALUES (?1, ?2, ?3, ?3)
@@ -252,6 +264,45 @@ impl Database {
         Ok(())
     }
 
+    pub fn has_prior_notification_event(
+        &self,
+        scan_id: &str,
+        event_type: &str,
+        vulnerability_id: Option<&str>,
+        service: &str,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().expect("database mutex poisoned");
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*)
+             FROM notification_events
+             WHERE (scan_id IS NULL OR scan_id != ?1)
+               AND event_type = ?2
+               AND ((vulnerability_id IS NULL AND ?3 IS NULL) OR vulnerability_id = ?3)
+               AND service_name = ?4",
+            params![scan_id, event_type, vulnerability_id, service],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn prior_notification_keys(
+        &self,
+        event_type: &str,
+    ) -> Result<HashSet<(Option<String>, String)>> {
+        let conn = self.conn.lock().expect("database mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT vulnerability_id, service_name
+             FROM notification_events
+             WHERE event_type = ?1",
+        )?;
+        let rows = stmt.query_map(params![event_type], |row| {
+            Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?))
+        })?;
+
+        rows.collect::<std::result::Result<HashSet<_>, _>>()
+            .context("failed to collect notification dedupe keys")
+    }
+
     pub fn has_prior_risk(
         &self,
         scan_id: &str,
@@ -329,32 +380,72 @@ impl Database {
         let Some(scan_id) = self.latest_scan_id()? else {
             return Ok(Summary::default());
         };
-        let inventory = self.inventory_for_scan(&scan_id)?;
-        let risks = self.risks_for_scan(&scan_id)?;
         let scan = self.scan_by_id(&scan_id)?;
+        let conn = self.conn.lock().expect("database mutex poisoned");
         let mut summary = Summary {
             last_scan_time: scan.completed_at.or(Some(scan.started_at)),
             ..Summary::default()
         };
 
-        for item in &inventory {
-            if item.kind == InventoryKind::Container && item.is_running() {
-                summary.running_containers += 1;
-            } else if item.is_running() {
-                summary.running_services += 1;
-            }
-            if item.exposure == Exposure::Public {
-                summary.public_services += 1;
+        {
+            let mut stmt = conn.prepare(
+                "SELECT kind, status, exposure, COUNT(*)
+                 FROM inventory_items
+                 WHERE scan_id = ?1
+                 GROUP BY kind, status, exposure",
+            )?;
+            let rows = stmt.query_map(params![&scan_id], |row| {
+                let kind_json: String = row.get(0)?;
+                let status_json: String = row.get(1)?;
+                let exposure_json: String = row.get(2)?;
+                Ok((
+                    inventory_kind_from_json(0, &kind_json)?,
+                    runtime_status_from_json(1, &status_json)?,
+                    exposure_from_json(2, &exposure_json)?,
+                    row.get::<_, i64>(3)? as usize,
+                ))
+            })?;
+
+            for row in rows {
+                let (kind, status, exposure, count) = row?;
+                if status_is_running(status) {
+                    match kind {
+                        InventoryKind::Container => summary.running_containers += count,
+                        InventoryKind::Service => summary.running_services += count,
+                        InventoryKind::ListeningPort => summary.listening_ports += count,
+                        InventoryKind::Package | InventoryKind::Host => {}
+                    }
+                }
+                if exposure == Exposure::Public {
+                    summary.public_services += count;
+                }
             }
         }
 
-        for risk in &risks {
-            match risk.risk {
-                RiskLevel::Critical => summary.critical_risks += 1,
-                RiskLevel::High => summary.high_risks += 1,
-                RiskLevel::Medium => summary.medium_risks += 1,
-                RiskLevel::Low => summary.low_risks += 1,
-                RiskLevel::Informational => {}
+        {
+            let mut stmt = conn.prepare(
+                "SELECT risk, COUNT(*)
+                 FROM risk_evaluations
+                 WHERE scan_id = ?1
+                 GROUP BY risk",
+            )?;
+            let rows = stmt.query_map(params![&scan_id], |row| {
+                let risk_json: String = row.get(0)?;
+                Ok((
+                    risk_level_from_json(0, &risk_json)?,
+                    row.get::<_, i64>(1)? as usize,
+                ))
+            })?;
+
+            for row in rows {
+                let (risk, count) = row?;
+                match risk {
+                    RiskLevel::Critical => summary.critical_risks += count,
+                    RiskLevel::High => summary.high_risks += count,
+                    RiskLevel::Medium => summary.medium_risks += count,
+                    RiskLevel::Low => summary.low_risks += count,
+                    RiskLevel::Informational => summary.informational_risks += count,
+                }
             }
         }
 
@@ -362,57 +453,125 @@ impl Database {
     }
 
     pub fn service_summaries(&self) -> Result<Vec<ServiceSummary>> {
-        let inventory = self.latest_inventory()?;
-        let risks = self.latest_risks()?;
-        Ok(inventory
-            .into_iter()
-            .map(|item| {
-                let related = risks
-                    .iter()
-                    .filter(|risk| risk.inventory_item_id == item.id)
-                    .collect::<Vec<_>>();
-                let highest_risk = related
-                    .iter()
-                    .map(|risk| risk.risk)
-                    .max_by_key(|risk| risk.score());
-                ServiceSummary {
-                    name: item.name,
-                    source: item.source,
-                    status: item.status,
-                    exposure: item.exposure,
-                    highest_risk,
-                    vulnerability_count: related.len(),
-                }
+        let Some(scan_id) = self.latest_scan_id()? else {
+            return Ok(Vec::new());
+        };
+        let conn = self.conn.lock().expect("database mutex poisoned");
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT
+                i.name,
+                i.source,
+                i.status,
+                i.exposure,
+                COUNT(r.row_id) AS vulnerability_count,
+                MAX(CASE r.risk
+                    WHEN '"critical"' THEN 5
+                    WHEN '"high"' THEN 4
+                    WHEN '"medium"' THEN 3
+                    WHEN '"low"' THEN 2
+                    WHEN '"informational"' THEN 1
+                    ELSE NULL
+                END) AS max_risk_score
+            FROM inventory_items i
+            LEFT JOIN risk_evaluations r
+              ON r.scan_id = i.scan_id AND r.inventory_item_id = i.item_id
+            WHERE i.scan_id = ?1
+            GROUP BY i.row_id, i.name, i.source, i.status, i.exposure
+            ORDER BY COALESCE(max_risk_score, 0) DESC, vulnerability_count DESC, i.name
+            "#,
+        )?;
+        let rows = stmt.query_map(params![&scan_id], |row| {
+            let source_json: String = row.get(1)?;
+            let status_json: String = row.get(2)?;
+            let exposure_json: String = row.get(3)?;
+            let max_risk_score: Option<i64> = row.get(5)?;
+
+            Ok(ServiceSummary {
+                name: row.get(0)?,
+                source: inventory_source_from_json(1, &source_json)?,
+                status: runtime_status_from_json(2, &status_json)?,
+                exposure: exposure_from_json(3, &exposure_json)?,
+                highest_risk: max_risk_score.and_then(risk_from_score),
+                vulnerability_count: row.get::<_, i64>(4)? as usize,
             })
-            .collect())
+        })?;
+        collect_rows(rows)
     }
 
     pub fn vulnerability_summaries(&self) -> Result<Vec<VulnerabilitySummary>> {
-        let risks = self.latest_risks()?;
-        let findings = self.latest_findings()?;
-        let mut summaries = risks
-            .into_iter()
-            .filter_map(|risk| {
-                let finding = findings
-                    .iter()
-                    .find(|finding| finding.id == risk.finding_id)?;
-                Some(VulnerabilitySummary {
-                    vulnerability_id: risk.vulnerability_id,
-                    severity: risk.severity,
-                    runtime_risk: risk.risk,
-                    affected_service: risk.service_name,
-                    exposed: risk.exposure,
-                    fix_available: finding.fix_available,
-                    first_seen: finding.first_seen,
-                    last_seen: finding.last_seen,
-                    package_name: finding.package_name.clone(),
-                    installed_version: finding.installed_version.clone(),
-                    fixed_version: finding.fixed_version.clone(),
-                })
-            })
-            .collect::<Vec<_>>();
-        summaries.sort_by_key(|summary| std::cmp::Reverse(summary.runtime_risk.score()));
-        Ok(summaries)
+        self.vulnerability_summaries_with_limit(None)
+    }
+
+    pub fn vulnerability_summaries_limited(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<VulnerabilitySummary>> {
+        self.vulnerability_summaries_with_limit(Some(limit))
+    }
+
+    fn vulnerability_summaries_with_limit(
+        &self,
+        limit: Option<usize>,
+    ) -> Result<Vec<VulnerabilitySummary>> {
+        let Some(scan_id) = self.latest_scan_id()? else {
+            return Ok(Vec::new());
+        };
+        let conn = self.conn.lock().expect("database mutex poisoned");
+        let base_query = r#"
+            WITH ranked AS (
+                SELECT
+                    r.data_json AS risk_json,
+                    f.data_json AS finding_json,
+                    r.service_name,
+                    r.vulnerability_id,
+                    CASE r.risk
+                        WHEN '"critical"' THEN 5
+                        WHEN '"high"' THEN 4
+                        WHEN '"medium"' THEN 3
+                        WHEN '"low"' THEN 2
+                        WHEN '"informational"' THEN 1
+                        ELSE 0
+                    END AS risk_score,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY r.service_name, r.vulnerability_id
+                        ORDER BY
+                            CASE r.risk
+                                WHEN '"critical"' THEN 5
+                                WHEN '"high"' THEN 4
+                                WHEN '"medium"' THEN 3
+                                WHEN '"low"' THEN 2
+                                WHEN '"informational"' THEN 1
+                                ELSE 0
+                            END DESC,
+                            r.row_id ASC
+                    ) AS row_rank
+                FROM risk_evaluations r
+                JOIN vulnerability_findings f
+                  ON f.scan_id = r.scan_id AND f.finding_id = r.finding_id
+                WHERE r.scan_id = ?1
+            )
+            SELECT risk_json, finding_json
+            FROM ranked
+            WHERE row_rank = 1
+            ORDER BY risk_score DESC, service_name, vulnerability_id
+        "#;
+        let query = if limit.is_some() {
+            format!("{base_query} LIMIT ?2")
+        } else {
+            base_query.to_string()
+        };
+        let mut stmt = conn.prepare(&query)?;
+        if let Some(limit) = limit {
+            let rows = stmt.query_map(
+                params![&scan_id, limit as i64],
+                vulnerability_summary_from_row,
+            )?;
+            collect_rows(rows)
+        } else {
+            let rows = stmt.query_map(params![&scan_id], vulnerability_summary_from_row)?;
+            collect_rows(rows)
+        }
     }
 
     pub fn list_scans(&self) -> Result<Vec<ScanRecord>> {
@@ -430,7 +589,7 @@ impl Database {
             .lock()
             .expect("database mutex poisoned")
             .query_row(
-                "SELECT id FROM scans WHERE status != 'running' ORDER BY started_at DESC LIMIT 1",
+                "SELECT id FROM scans WHERE status IN ('completed', 'completed_with_errors') ORDER BY started_at DESC LIMIT 1",
                 [],
                 |row| row.get(0),
             )
@@ -500,6 +659,75 @@ fn parse_datetime_sql(value: &str) -> rusqlite::Result<DateTime<Utc>> {
                 Box::new(error),
             )
         })
+}
+
+fn inventory_kind_from_json(column: usize, value: &str) -> rusqlite::Result<InventoryKind> {
+    serde_json::from_str(value).map_err(|error| json_sql_error(column, error))
+}
+
+fn inventory_source_from_json(column: usize, value: &str) -> rusqlite::Result<InventorySource> {
+    serde_json::from_str(value).map_err(|error| json_sql_error(column, error))
+}
+
+fn runtime_status_from_json(column: usize, value: &str) -> rusqlite::Result<RuntimeStatus> {
+    serde_json::from_str(value).map_err(|error| json_sql_error(column, error))
+}
+
+fn exposure_from_json(column: usize, value: &str) -> rusqlite::Result<Exposure> {
+    serde_json::from_str(value).map_err(|error| json_sql_error(column, error))
+}
+
+fn risk_level_from_json(column: usize, value: &str) -> rusqlite::Result<RiskLevel> {
+    serde_json::from_str(value).map_err(|error| json_sql_error(column, error))
+}
+
+fn risk_evaluation_from_json(column: usize, value: &str) -> rusqlite::Result<RiskEvaluation> {
+    serde_json::from_str(value).map_err(|error| json_sql_error(column, error))
+}
+
+fn vulnerability_finding_from_json(
+    column: usize,
+    value: &str,
+) -> rusqlite::Result<VulnerabilityFinding> {
+    serde_json::from_str(value).map_err(|error| json_sql_error(column, error))
+}
+
+fn status_is_running(status: RuntimeStatus) -> bool {
+    matches!(status, RuntimeStatus::Running | RuntimeStatus::Active)
+}
+
+fn risk_from_score(score: i64) -> Option<RiskLevel> {
+    match score {
+        5 => Some(RiskLevel::Critical),
+        4 => Some(RiskLevel::High),
+        3 => Some(RiskLevel::Medium),
+        2 => Some(RiskLevel::Low),
+        1 => Some(RiskLevel::Informational),
+        _ => None,
+    }
+}
+
+fn vulnerability_summary_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<VulnerabilitySummary> {
+    let risk_json: String = row.get(0)?;
+    let finding_json: String = row.get(1)?;
+    let risk = risk_evaluation_from_json(0, &risk_json)?;
+    let finding = vulnerability_finding_from_json(1, &finding_json)?;
+
+    Ok(VulnerabilitySummary {
+        vulnerability_id: risk.vulnerability_id,
+        severity: risk.severity,
+        runtime_risk: risk.risk,
+        affected_service: risk.service_name,
+        exposed: risk.exposure,
+        fix_available: finding.fix_available,
+        first_seen: finding.first_seen,
+        last_seen: finding.last_seen,
+        package_name: finding.package_name,
+        installed_version: finding.installed_version,
+        fixed_version: finding.fixed_version,
+    })
 }
 
 fn collect_rows<T>(

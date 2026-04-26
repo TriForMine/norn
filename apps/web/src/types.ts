@@ -1,15 +1,28 @@
 export type Exposure = "public" | "internal" | "localhost" | "unknown";
-export type RiskLevel = "critical" | "high" | "medium" | "low" | "informational";
-export type Severity = "critical" | "high" | "medium" | "low" | "negligible" | "unknown";
+export type RiskLevel =
+  | "critical"
+  | "high"
+  | "medium"
+  | "low"
+  | "informational";
+export type Severity =
+  | "critical"
+  | "high"
+  | "medium"
+  | "low"
+  | "negligible"
+  | "unknown";
 
 export interface Summary {
   running_services: number;
   running_containers: number;
+  listening_ports: number;
   public_services: number;
   critical_risks: number;
   high_risks: number;
   medium_risks: number;
   low_risks: number;
+  informational_risks: number;
   last_scan_time?: string | null;
 }
 

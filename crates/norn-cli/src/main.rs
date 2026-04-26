@@ -1,10 +1,10 @@
 use std::{
     cmp::Reverse,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{self, Stdout},
     path::PathBuf,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
@@ -106,6 +106,15 @@ enum NotifyCommand {
 enum OutputFormat {
     Json,
     Table,
+}
+
+const TUI_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const TUI_VULNERABILITY_LIMIT: usize = 200;
+
+#[derive(Debug, Default)]
+struct NotificationBatch {
+    events: Vec<NotificationEvent>,
+    suppressed: usize,
 }
 
 fn parse_positive_usize(value: &str) -> std::result::Result<usize, String> {
@@ -307,13 +316,29 @@ impl LocalScanRunner {
         risk_progress.finish_with_message(format!("Evaluated {} runtime risks", risks.len()));
 
         let notification_progress = progress.spinner("Preparing notifications");
-        let risk_events = self.notification_events_for_risks(&scan, &inventory_by_id, &risks)?;
-        let container_events =
-            self.notification_events_for_sensitive_containers(&scan, &inventory)?;
-        notification_progress.finish_with_message(format!(
-            "Prepared {} notifications",
-            risk_events.len() + container_events.len()
-        ));
+        let notification_batch = if self.notifier.is_some() {
+            self.prepare_notification_batch(&inventory_by_id, &risks, &inventory)?
+        } else {
+            NotificationBatch::default()
+        };
+        if self.notifier.is_some() {
+            let prepared = notification_batch.events.len();
+            let suppressed = notification_batch.suppressed;
+            if suppressed > 0 && self.config.risk.max_notifications_per_scan == 0 {
+                notification_progress.finish_with_message(format!(
+                    "Suppressed {suppressed} notifications (cap is 0)"
+                ));
+            } else if suppressed > 0 {
+                notification_progress.finish_with_message(format!(
+                    "Prepared {prepared} notifications ({suppressed} summarized)"
+                ));
+            } else {
+                notification_progress
+                    .finish_with_message(format!("Prepared {prepared} notifications"));
+            }
+        } else {
+            notification_progress.finish_with_message("Skipped notifications (notifier disabled)");
+        }
 
         let storage_progress = progress.spinner("Storing scan results");
         self.db.insert_inventory(&scan.id, &inventory)?;
@@ -321,7 +346,7 @@ impl LocalScanRunner {
         self.db.insert_risks(&scan.id, &risks)?;
         storage_progress.finish_with_message("Stored scan results");
 
-        for event in risk_events.into_iter().chain(container_events) {
+        for event in notification_batch.events {
             self.send_notification(&scan.id, event).await;
         }
 
@@ -349,21 +374,79 @@ impl LocalScanRunner {
         })
     }
 
-    fn notification_events_for_risks(
+    fn prepare_notification_batch(
         &self,
-        scan: &ScanRecord,
         inventory_by_id: &HashMap<String, &InventoryItem>,
         risks: &[norn_core::RiskEvaluation],
+        inventory: &[InventoryItem],
+    ) -> Result<NotificationBatch> {
+        let prior_notifications = self.db.prior_notification_keys("risk")?;
+        let mut events =
+            self.notification_events_for_risks(inventory_by_id, risks, &prior_notifications)?;
+        events.extend(
+            self.notification_events_for_sensitive_containers(inventory, &prior_notifications)?,
+        );
+        events.sort_by_key(|event| {
+            (
+                Reverse(event.runtime_risk.score()),
+                event.service.clone(),
+                event.vulnerability_id.clone(),
+            )
+        });
+
+        let limit = self.config.risk.max_notifications_per_scan;
+        let total_candidates = events.len();
+        if total_candidates <= limit {
+            return Ok(NotificationBatch {
+                events,
+                suppressed: 0,
+            });
+        }
+
+        if limit == 0 {
+            return Ok(NotificationBatch {
+                events: Vec::new(),
+                suppressed: total_candidates,
+            });
+        }
+
+        let individual_limit = limit.saturating_sub(1);
+        events.truncate(individual_limit);
+        let suppressed = total_candidates.saturating_sub(events.len());
+        events.push(self.notification_summary_event(events.len(), suppressed));
+
+        Ok(NotificationBatch { events, suppressed })
+    }
+
+    fn notification_events_for_risks(
+        &self,
+        inventory_by_id: &HashMap<String, &InventoryItem>,
+        risks: &[norn_core::RiskEvaluation],
+        prior_notifications: &HashSet<(Option<String>, String)>,
     ) -> Result<Vec<NotificationEvent>> {
         let mut events = Vec::new();
-        for risk in risks {
-            if !risk.risk.at_least(self.config.risk.notify_minimum) {
+        let mut seen = HashSet::new();
+        let mut candidates = risks
+            .iter()
+            .filter(|risk| risk.risk.at_least(self.config.risk.notify_minimum))
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|risk| {
+            (
+                Reverse(risk.risk.score()),
+                risk.service_name.clone(),
+                risk.vulnerability_id.clone(),
+            )
+        });
+
+        for risk in candidates {
+            let key = (risk.service_name.clone(), risk.vulnerability_id.clone());
+            if !seen.insert(key) {
                 continue;
             }
-            if self
-                .db
-                .has_prior_risk(&scan.id, &risk.vulnerability_id, &risk.service_name)?
-            {
+            if prior_notifications.contains(&(
+                Some(risk.vulnerability_id.clone()),
+                risk.service_name.clone(),
+            )) {
                 continue;
             }
             let artifact = inventory_by_id
@@ -387,8 +470,8 @@ impl LocalScanRunner {
 
     fn notification_events_for_sensitive_containers(
         &self,
-        scan: &ScanRecord,
         inventory: &[InventoryItem],
+        prior_notifications: &HashSet<(Option<String>, String)>,
     ) -> Result<Vec<NotificationEvent>> {
         let mut events = Vec::new();
         for item in inventory {
@@ -397,7 +480,7 @@ impl LocalScanRunner {
             };
             if docker.privileged {
                 let key = "NORN-PRIVILEGED-CONTAINER";
-                if !self.db.has_prior_risk(&scan.id, key, &item.name)? {
+                if !prior_notifications.contains(&(Some(key.to_string()), item.name.clone())) {
                     events.push(NotificationEvent {
                         project: "Norn".to_string(),
                         host: self.host.clone(),
@@ -416,7 +499,7 @@ impl LocalScanRunner {
             }
             if docker.docker_socket_mounted {
                 let key = "NORN-DOCKER-SOCKET-MOUNT";
-                if !self.db.has_prior_risk(&scan.id, key, &item.name)? {
+                if !prior_notifications.contains(&(Some(key.to_string()), item.name.clone())) {
                     events.push(NotificationEvent {
                         project: "Norn".to_string(),
                         host: self.host.clone(),
@@ -438,13 +521,41 @@ impl LocalScanRunner {
         Ok(events)
     }
 
+    fn notification_summary_event(&self, sent: usize, suppressed: usize) -> NotificationEvent {
+        NotificationEvent {
+            project: "Norn".to_string(),
+            host: self.host.clone(),
+            service: "scan-summary".to_string(),
+            artifact: None,
+            vulnerability_id: Some("NORN-NOTIFICATION-SUMMARY".to_string()),
+            severity: None,
+            runtime_risk: RiskLevel::High,
+            exposure: Exposure::Unknown,
+            reason: format!(
+                "Norn found more new notification candidates than the configured per-scan cap. Sent {sent} individual notifications and summarized {suppressed} additional candidates."
+            ),
+            recommended_action: Some(format!(
+                "Review the dashboard or report for the full scan. Increase risk.max_notifications_per_scan above {} if you want more individual alerts.",
+                self.config.risk.max_notifications_per_scan
+            )),
+        }
+    }
+
     async fn send_notification(&self, scan_id: &str, event: NotificationEvent) {
         let Some(notifier) = &self.notifier else {
             return;
         };
+        let event_type = if event.vulnerability_id.as_deref() == Some("NORN-NOTIFICATION-SUMMARY") {
+            "summary"
+        } else {
+            "risk"
+        };
         match notifier.send(event.clone()).await {
             Ok(()) => {
-                if let Err(error) = self.db.insert_notification(Some(scan_id), "risk", &event) {
+                if let Err(error) = self
+                    .db
+                    .insert_notification(Some(scan_id), event_type, &event)
+                {
                     warn!(error = %error, "failed to store notification event");
                 }
             }
@@ -720,13 +831,18 @@ struct TuiSnapshot {
 
 async fn run_tui(db: Database, runner: LocalScanRunner) -> Result<()> {
     let (mut terminal, _guard) = enter_tui()?;
-    let mut status = "q quit | r run scan".to_string();
+    let mut status = "q quit | r run scan | R refresh".to_string();
+    let mut snapshot = load_tui_snapshot(&db)?;
+    let mut last_refresh = Instant::now();
 
     loop {
-        let snapshot = load_tui_snapshot(&db)?;
         terminal.draw(|frame| draw_tui(frame, &snapshot, &status))?;
 
         if !event::poll(Duration::from_millis(250))? {
+            if last_refresh.elapsed() >= TUI_REFRESH_INTERVAL {
+                snapshot = load_tui_snapshot(&db)?;
+                last_refresh = Instant::now();
+            }
             continue;
         }
 
@@ -738,17 +854,25 @@ async fn run_tui(db: Database, runner: LocalScanRunner) -> Result<()> {
             KeyCode::Char('q') | KeyCode::Esc => break,
             KeyCode::Char('r') => {
                 status = "Running scan...".to_string();
-                let snapshot = load_tui_snapshot(&db)?;
                 terminal.draw(|frame| draw_tui(frame, &snapshot, &status))?;
                 status = match runner.run_scan().await {
-                    Ok(outcome) => format!(
-                        "Scan completed: {} inventory, {} findings, {} errors",
-                        outcome.scan.inventory_count,
-                        outcome.scan.finding_count,
-                        outcome.scan.scanner_errors.len()
-                    ),
+                    Ok(outcome) => {
+                        snapshot = load_tui_snapshot(&db)?;
+                        last_refresh = Instant::now();
+                        format!(
+                            "Scan completed: {} inventory, {} findings, {} errors",
+                            outcome.scan.inventory_count,
+                            outcome.scan.finding_count,
+                            outcome.scan.scanner_errors.len()
+                        )
+                    }
                     Err(error) => format!("Scan failed: {error}"),
                 };
+            }
+            KeyCode::Char('R') => {
+                snapshot = load_tui_snapshot(&db)?;
+                last_refresh = Instant::now();
+                status = "Dashboard refreshed".to_string();
             }
             _ => {}
         }
@@ -800,14 +924,7 @@ fn load_tui_snapshot(db: &Database) -> Result<TuiSnapshot> {
         )
     });
 
-    let mut vulnerabilities = db.vulnerability_summaries()?;
-    vulnerabilities.sort_by_key(|vulnerability| {
-        (
-            Reverse(vulnerability.runtime_risk.score()),
-            vulnerability.affected_service.clone(),
-            vulnerability.vulnerability_id.clone(),
-        )
-    });
+    let vulnerabilities = db.vulnerability_summaries_limited(TUI_VULNERABILITY_LIMIT)?;
 
     Ok(TuiSnapshot {
         summary: db.summary()?,
@@ -857,8 +974,11 @@ fn overview_widget(summary: &Summary) -> Paragraph<'_> {
             Span::raw(format!(" | Last scan: {last_scan}")),
         ]),
         Line::from(format!(
-            "Running containers: {} | Active services: {} | Public services: {}",
-            summary.running_containers, summary.running_services, summary.public_services
+            "Running containers: {} | Active services: {} | Listening ports: {} | Publicly bound: {}",
+            summary.running_containers,
+            summary.running_services,
+            summary.listening_ports,
+            summary.public_services
         )),
         Line::from(vec![
             risk_count_span("Critical", summary.critical_risks, Color::Red),
@@ -868,6 +988,8 @@ fn overview_widget(summary: &Summary) -> Paragraph<'_> {
             risk_count_span("Medium", summary.medium_risks, Color::Yellow),
             Span::raw("  "),
             risk_count_span("Low", summary.low_risks, Color::Blue),
+            Span::raw("  "),
+            risk_count_span("Info", summary.informational_risks, Color::Gray),
         ]),
     ])
     .block(Block::default().title("Overview").borders(Borders::ALL))
@@ -1019,11 +1141,19 @@ fn print_scan_summary(outcome: &ScanOutcome) {
     println!("Host: {}", console_style(&outcome.scan.host).cyan());
     println!("Running containers: {}", outcome.summary.running_containers);
     println!("Active services: {}", outcome.summary.running_services);
-    println!("Public services: {}", outcome.summary.public_services);
+    println!("Listening ports: {}", outcome.summary.listening_ports);
+    println!(
+        "Publicly bound inventory items: {}",
+        outcome.summary.public_services
+    );
     println!("Critical runtime risks: {}", outcome.summary.critical_risks);
     println!("High runtime risks: {}", outcome.summary.high_risks);
     println!("Medium runtime risks: {}", outcome.summary.medium_risks);
     println!("Low runtime risks: {}", outcome.summary.low_risks);
+    println!(
+        "Informational runtime risks: {}",
+        outcome.summary.informational_risks
+    );
     if !outcome.scan.scanner_errors.is_empty() {
         println!(
             "{}",
@@ -1077,9 +1207,19 @@ fn print_report(db: &Database) -> Result<()> {
     println!();
     println!("- Running containers: {}", summary.running_containers);
     println!("- Active services: {}", summary.running_services);
-    println!("- Public services: {}", summary.public_services);
+    println!("- Listening ports: {}", summary.listening_ports);
+    println!(
+        "- Publicly bound inventory items: {}",
+        summary.public_services
+    );
     println!("- Critical runtime risks: {}", summary.critical_risks);
     println!("- High runtime risks: {}", summary.high_risks);
+    println!("- Medium runtime risks: {}", summary.medium_risks);
+    println!("- Low runtime risks: {}", summary.low_risks);
+    println!(
+        "- Informational runtime risks: {}",
+        summary.informational_risks
+    );
     println!();
     println!("## Urgent");
     print_report_group(

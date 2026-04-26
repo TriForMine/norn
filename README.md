@@ -46,11 +46,13 @@ Example output:
 Host: homelab
 Running containers: 12
 Active services: 48
-Public services: 5
+Listening ports: 81
+Publicly bound inventory items: 5
 Critical runtime risks: 1
 High runtime risks: 3
 Medium runtime risks: 11
 Low runtime risks: 7
+Informational runtime risks: 13
 ```
 
 Build and test everything:
@@ -94,7 +96,7 @@ norn ignore CVE-2026-0001 --service nginx --days 30 --config /etc/norn/config.to
 - `GET /api/summary`
 - `GET /api/inventory`
 - `GET /api/services`
-- `GET /api/vulnerabilities`
+- `GET /api/vulnerabilities` accepts optional `?limit=500` style caps for dashboard-sized responses
 - `GET /api/scans`
 - `POST /api/scans/run`
 - `POST /api/ignore`
@@ -134,9 +136,10 @@ webhook_url = ""
 
 [risk]
 notify_minimum = "High"
+max_notifications_per_scan = 50
 ```
 
-Environment overrides include `NORN_SERVER_BIND`, `NORN_DATABASE_URL`, `NORN_SCAN_INTERVAL`, `NORN_SCANNER_PARALLELISM`, `NORN_GRYPE_BINARY`, `NORN_DISCORD_ENABLED`, `NORN_DISCORD_WEBHOOK_URL`, and `NORN_RISK_NOTIFY_MINIMUM`.
+Environment overrides include `NORN_SERVER_BIND`, `NORN_DATABASE_URL`, `NORN_SCAN_INTERVAL`, `NORN_SCANNER_PARALLELISM`, `NORN_GRYPE_BINARY`, `NORN_DISCORD_ENABLED`, `NORN_DISCORD_WEBHOOK_URL`, `NORN_RISK_NOTIFY_MINIMUM`, and `NORN_RISK_MAX_NOTIFICATIONS_PER_SCAN`.
 
 ## Docker Compose
 

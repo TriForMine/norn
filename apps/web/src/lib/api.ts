@@ -1,4 +1,9 @@
-import type { ScanRecord, ServiceSummary, Summary, VulnerabilitySummary } from "../types";
+import type {
+  ScanRecord,
+  ServiceSummary,
+  Summary,
+  VulnerabilitySummary,
+} from "../types";
 
 async function getJson<T>(path: string): Promise<T> {
   const response = await fetch(path);
@@ -11,7 +16,8 @@ async function getJson<T>(path: string): Promise<T> {
 export const api = {
   summary: () => getJson<Summary>("/api/summary"),
   services: () => getJson<ServiceSummary[]>("/api/services"),
-  vulnerabilities: () => getJson<VulnerabilitySummary[]>("/api/vulnerabilities"),
+  vulnerabilities: () =>
+    getJson<VulnerabilitySummary[]>("/api/vulnerabilities?limit=500"),
   scans: () => getJson<ScanRecord[]>("/api/scans"),
   runScan: async () => {
     const response = await fetch("/api/scans/run", { method: "POST" });
@@ -24,7 +30,7 @@ export const api = {
     const response = await fetch("/api/notifications/test", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ webhook_url: webhookUrl })
+      body: JSON.stringify({ webhook_url: webhookUrl }),
     });
     if (!response.ok) {
       throw new Error(`notification test failed with ${response.status}`);
@@ -38,12 +44,12 @@ export const api = {
       body: JSON.stringify({
         vulnerability_id: vulnerabilityId,
         service: service || undefined,
-        days
-      })
+        days,
+      }),
     });
     if (!response.ok) {
       throw new Error(`ignore failed with ${response.status}`);
     }
     return response.json();
-  }
+  },
 };

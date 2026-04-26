@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS inventory_items (
 
 CREATE INDEX IF NOT EXISTS idx_inventory_scan ON inventory_items(scan_id);
 CREATE INDEX IF NOT EXISTS idx_inventory_item ON inventory_items(item_id);
+CREATE INDEX IF NOT EXISTS idx_inventory_scan_item ON inventory_items(scan_id, item_id);
 
 CREATE TABLE IF NOT EXISTS vulnerability_findings (
   row_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -47,6 +48,7 @@ CREATE TABLE IF NOT EXISTS vulnerability_findings (
 );
 
 CREATE INDEX IF NOT EXISTS idx_findings_scan ON vulnerability_findings(scan_id);
+CREATE INDEX IF NOT EXISTS idx_findings_scan_finding ON vulnerability_findings(scan_id, finding_id);
 CREATE INDEX IF NOT EXISTS idx_findings_vuln_service ON vulnerability_findings(vulnerability_id, inventory_item_id);
 
 CREATE TABLE IF NOT EXISTS risk_evaluations (
@@ -64,6 +66,8 @@ CREATE TABLE IF NOT EXISTS risk_evaluations (
 );
 
 CREATE INDEX IF NOT EXISTS idx_risks_scan ON risk_evaluations(scan_id);
+CREATE INDEX IF NOT EXISTS idx_risks_scan_item ON risk_evaluations(scan_id, inventory_item_id);
+CREATE INDEX IF NOT EXISTS idx_risks_scan_vuln_service ON risk_evaluations(scan_id, service_name, vulnerability_id);
 CREATE INDEX IF NOT EXISTS idx_risks_vuln_service ON risk_evaluations(vulnerability_id, service_name);
 
 CREATE TABLE IF NOT EXISTS ignored_findings (
@@ -87,3 +91,8 @@ CREATE TABLE IF NOT EXISTS notification_events (
   data_json TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_notifications_dedupe
+  ON notification_events(event_type, vulnerability_id, service_name);
+CREATE INDEX IF NOT EXISTS idx_notifications_scan
+  ON notification_events(scan_id);

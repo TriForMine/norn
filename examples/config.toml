@@ -41,3 +41,4 @@ webhook_url = ""
 
 [risk]
 notify_minimum = "High"
+max_notifications_per_scan = 50
