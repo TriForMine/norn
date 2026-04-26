@@ -241,18 +241,17 @@ fn collect_via_unix_socket(socket: PathBuf) -> Result<Vec<InventoryItem>> {
         stream
             .read_to_string(&mut response)
             .context("failed to read Docker API response")?;
-        let (head, body) = response
-            .split_once("\r\n\r\n")
-            .ok_or_else(|| anyhow!("invalid Docker API HTTP response"))?;
-        if !head.starts_with("HTTP/1.1 200") && !head.starts_with("HTTP/1.0 200") {
-            return Err(anyhow!("Docker API request {path} failed: {head}"));
-        }
-        Ok(body.to_string())
+        docker_http_body(&response, path)
     }
 
     let containers_json = docker_get(&socket, "/containers/json")?;
     let containers: Vec<DockerPsContainer> =
-        serde_json::from_str(&containers_json).context("failed to parse Docker container list")?;
+        serde_json::from_str(&containers_json).with_context(|| {
+            format!(
+                "failed to parse Docker container list: {}",
+                preview(&containers_json)
+            )
+        })?;
     let mut inspect_json = Vec::new();
     for container in containers {
         inspect_json.push(docker_get(
@@ -268,6 +267,85 @@ fn collect_via_unix_socket(socket: PathBuf) -> Result<Vec<InventoryItem>> {
         items.push(inventory_item_from_inspect(&inspect)?);
     }
     Ok(items)
+}
+
+#[cfg(any(unix, test))]
+fn docker_http_body(response: &str, path: &str) -> Result<String> {
+    let (head, body) = response
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| anyhow!("invalid Docker API HTTP response"))?;
+    if !head.starts_with("HTTP/1.1 200") && !head.starts_with("HTTP/1.0 200") {
+        return Err(anyhow!("Docker API request {path} failed: {head}"));
+    }
+
+    if head
+        .lines()
+        .any(|line| line.to_ascii_lowercase().trim() == "transfer-encoding: chunked")
+    {
+        decode_chunked_body(body)
+    } else {
+        Ok(body.to_string())
+    }
+}
+
+#[cfg(any(unix, test))]
+fn decode_chunked_body(body: &str) -> Result<String> {
+    let bytes = body.as_bytes();
+    let mut decoded = Vec::new();
+    let mut position = 0;
+
+    loop {
+        let line_end = find_crlf(bytes, position)
+            .ok_or_else(|| anyhow!("invalid chunked Docker API response: missing chunk size"))?;
+        let size_line = std::str::from_utf8(&bytes[position..line_end])
+            .context("invalid chunked Docker API response: chunk size is not UTF-8")?;
+        let size_hex = size_line.split(';').next().unwrap_or_default().trim();
+        let size = usize::from_str_radix(size_hex, 16)
+            .with_context(|| format!("invalid Docker API chunk size '{size_hex}'"))?;
+        position = line_end + 2;
+
+        if size == 0 {
+            break;
+        }
+
+        let chunk_end = position + size;
+        if chunk_end > bytes.len() {
+            return Err(anyhow!(
+                "invalid chunked Docker API response: chunk exceeds response length"
+            ));
+        }
+        decoded.extend_from_slice(&bytes[position..chunk_end]);
+        position = chunk_end;
+
+        if bytes.get(position..position + 2) != Some(b"\r\n") {
+            return Err(anyhow!(
+                "invalid chunked Docker API response: missing chunk terminator"
+            ));
+        }
+        position += 2;
+    }
+
+    String::from_utf8(decoded).context("Docker API response body is not UTF-8")
+}
+
+#[cfg(any(unix, test))]
+fn find_crlf(bytes: &[u8], start: usize) -> Option<usize> {
+    bytes
+        .get(start..)?
+        .windows(2)
+        .position(|window| window == b"\r\n")
+        .map(|offset| start + offset)
+}
+
+#[cfg(unix)]
+fn preview(value: &str) -> String {
+    const MAX: usize = 160;
+    let compact = value.replace(['\r', '\n'], "\\n");
+    if compact.len() <= MAX {
+        compact
+    } else {
+        format!("{}...", &compact[..MAX])
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -432,5 +510,29 @@ mod tests {
 
         assert!(agent.docker.as_ref().unwrap().docker_socket_mounted);
         assert_eq!(agent.exposure, Exposure::Localhost);
+    }
+
+    #[test]
+    fn decodes_chunked_docker_api_response() {
+        let response = concat!(
+            "HTTP/1.1 200 OK\r\n",
+            "Content-Type: application/json\r\n",
+            "Transfer-Encoding: chunked\r\n",
+            "\r\n",
+            "5\r\n",
+            "[{\"Id\r\n",
+            "7\r\n",
+            "\":\"abc\"\r\n",
+            "2\r\n",
+            "}]\r\n",
+            "0\r\n",
+            "\r\n"
+        );
+
+        let body = docker_http_body(response, "/containers/json").unwrap();
+
+        assert_eq!(body, r#"[{"Id":"abc"}]"#);
+        let containers: Vec<DockerPsContainer> = serde_json::from_str(&body).unwrap();
+        assert_eq!(containers[0].id, "abc");
     }
 }
