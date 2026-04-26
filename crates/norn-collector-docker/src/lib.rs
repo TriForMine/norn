@@ -108,7 +108,11 @@ fn inventory_item_from_inspect(container: &ContainerInspect) -> Result<Inventory
     item.docker = Some(DockerMetadata {
         container_id: container.id.clone(),
         image,
-        image_id: None,
+        image_id: container
+            .image_id
+            .as_ref()
+            .filter(|image_id| !image_id.trim().is_empty())
+            .cloned(),
         privileged,
         docker_socket_mounted,
         labels,
@@ -393,6 +397,8 @@ struct ContainerInspect {
     id: String,
     #[serde(rename = "Name")]
     name: String,
+    #[serde(rename = "Image")]
+    image_id: Option<String>,
     #[serde(rename = "Config")]
     config: ContainerConfig,
     #[serde(rename = "State")]
@@ -472,6 +478,10 @@ mod tests {
         assert_eq!(items.len(), 4);
         assert_eq!(items[0].name, "norn-nginx");
         assert_eq!(items[0].image.as_deref(), Some("nginx:1.25.3"));
+        assert_eq!(
+            items[0].docker.as_ref().unwrap().image_id.as_deref(),
+            Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
         assert_eq!(items[0].labels.get("norn.service").unwrap(), "edge");
     }
 

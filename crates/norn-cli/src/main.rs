@@ -30,7 +30,10 @@ use norn_core::{
     VulnerabilityFinding, VulnerabilityScanner, VulnerabilitySummary, DEFAULT_CONFIG_PATH,
 };
 use norn_db::Database;
-use norn_inventory::{scan_targets_from_inventory, CollectorRegistry};
+use norn_inventory::{
+    expand_findings_to_targets, scan_targets_from_inventory, unique_scan_target_groups,
+    CollectorRegistry,
+};
 use norn_notify::DiscordNotifier;
 use norn_risk::evaluate_finding;
 use norn_scanner_grype::GrypeScanner;
@@ -505,11 +508,23 @@ async fn scan_targets_with_progress(
 ) -> (Vec<VulnerabilityFinding>, Vec<ScannerError>) {
     let mut findings = Vec::new();
     let mut errors = Vec::new();
-    let total = targets.len().saturating_mul(scanners.len()) as u64;
+    let groups = unique_scan_target_groups(targets);
+    let total = groups.len().saturating_mul(scanners.len()) as u64;
+    let container_checks = targets.len().saturating_mul(scanners.len());
+    let duplicate_checks = container_checks.saturating_sub(total as usize);
     let parallelism = parallelism.max(1);
+    debug!(
+        target_checks = container_checks,
+        unique_checks = total,
+        duplicate_checks,
+        parallelism,
+        "deduplicated vulnerability scan targets"
+    );
     let scan_progress = progress.bar(
         total,
-        format!("Scanning vulnerability targets ({parallelism} jobs)"),
+        format!(
+            "Scanning vulnerability targets ({parallelism} jobs, {duplicate_checks} duplicates skipped)"
+        ),
     );
 
     if total == 0 {
@@ -520,7 +535,7 @@ async fn scan_targets_with_progress(
     let semaphore = Arc::new(tokio::sync::Semaphore::new(parallelism));
     let mut tasks = tokio::task::JoinSet::new();
 
-    for target in targets {
+    for group in groups {
         for scanner in scanners {
             let permit = semaphore
                 .clone()
@@ -528,21 +543,26 @@ async fn scan_targets_with_progress(
                 .await
                 .expect("scanner semaphore is not closed");
             let scanner = Arc::clone(scanner);
-            let target = target.clone();
+            let target = group.representative.clone();
+            let target_count = group.targets.len();
+            let targets = group.targets.clone();
             let scan_progress = scan_progress.clone();
             tasks.spawn(async move {
                 let _permit = permit;
                 let scanner_name = scanner.name();
-                scan_progress
-                    .set_message(format!("Scanning {} with {}", target.name, scanner_name));
+                scan_progress.set_message(format!(
+                    "Scanning {} with {} ({target_count} containers)",
+                    target.name, scanner_name
+                ));
                 debug!(
                     scanner = scanner_name,
                     target = %target.reference,
+                    target_count,
                     "running vulnerability scanner"
                 );
                 let result = match scanner.scan(target.clone()).await {
                     Ok(findings) => ScanJobResult {
-                        findings,
+                        findings: expand_findings_to_targets(&findings, &targets),
                         error: None,
                     },
                     Err(error) => {

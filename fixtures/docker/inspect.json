@@ -2,6 +2,7 @@
   {
     "Id": "1111111111111111111111111111111111111111111111111111111111111111",
     "Name": "/norn-nginx",
+    "Image": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "Config": {
       "Image": "nginx:1.25.3",
       "Labels": {
@@ -52,6 +53,7 @@
   {
     "Id": "2222222222222222222222222222222222222222222222222222222222222222",
     "Name": "/norn-postgres",
+    "Image": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "Config": {
       "Image": "postgres:15.4",
       "Labels": {
@@ -77,6 +79,7 @@
   {
     "Id": "3333333333333333333333333333333333333333333333333333333333333333",
     "Name": "/norn-privileged-worker",
+    "Image": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     "Config": {
       "Image": "example/worker:2.0",
       "Labels": {}
@@ -98,6 +101,7 @@
   {
     "Id": "4444444444444444444444444444444444444444444444444444444444444444",
     "Name": "/norn-build-agent",
+    "Image": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
     "Config": {
       "Image": "example/build-agent:1.0",
       "Labels": {

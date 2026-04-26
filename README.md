@@ -18,6 +18,7 @@ The MVP includes a React dashboard with summary cards, services, vulnerabilities
 - Single-host all-in-one mode: collector, scanner, database, API, dashboard, scheduler, and notifications.
 - Modular Rust traits for collectors, vulnerability scanners, notifiers, and scan runners.
 - Docker runtime collector with Unix socket and HTTP socket-proxy support.
+- Docker image scans use local image IDs when available and deduplicate identical images before invoking Grype.
 - Linux host collectors for systemd services, dpkg packages, and listening ports.
 - Grype scanner adapter with subprocess execution, timeout handling, missing-binary errors, and fixture parsing.
 - Runtime risk engine that considers severity, public exposure, container privilege, Docker socket mounts, and fix availability.
