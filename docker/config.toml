@@ -1,0 +1,35 @@
+[server]
+bind = "0.0.0.0:8787"
+static_dir = "/opt/norn/web"
+
+[database]
+url = "sqlite:///data/norn.db"
+
+[scan]
+interval = "6h"
+run_on_start = true
+
+[collectors.docker]
+enabled = true
+socket = "/var/run/docker.sock"
+
+[collectors.systemd]
+enabled = false
+
+[collectors.packages]
+enabled = true
+
+[collectors.ports]
+enabled = true
+
+[scanner.grype]
+enabled = true
+binary = "grype"
+timeout_seconds = 300
+
+[notifications.discord]
+enabled = false
+webhook_url = ""
+
+[risk]
+notify_minimum = "High"

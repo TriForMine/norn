@@ -1,0 +1,9 @@
+Desired=Unknown/Install/Remove/Purge/Hold
+| Status=Not/Inst/Conf-files/Unpacked/halF-conf/Half-inst/trig-aWait/Trig-pend
+|/ Err?=(none)/Reinst-required (Status,Err: uppercase=bad)
+||/ Name           Version              Architecture Description
++++-==============-====================-============-=================================
+ii  bash           5.2.15-2+b7          amd64        GNU Bourne Again SHell
+ii  openssl        3.0.11-1~deb12u2     amd64        Secure Sockets Layer toolkit
+ii  nginx          1.22.1-9             amd64        small, powerful, scalable web/proxy server
+rc  oldpkg         0.1.0                amd64        removed package should be ignored

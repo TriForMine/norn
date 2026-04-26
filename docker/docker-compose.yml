@@ -1,0 +1,15 @@
+services:
+  norn:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: norn:local
+    ports:
+      - "8787:8787"
+    volumes:
+      - ../data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      NORN_DISCORD_ENABLED: "false"
+      NORN_DISCORD_WEBHOOK_URL: ""
+    restart: unless-stopped

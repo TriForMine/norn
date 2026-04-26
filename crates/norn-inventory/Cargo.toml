@@ -1,0 +1,15 @@
+[package]
+name = "norn-inventory"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Inventory orchestration helpers for Norn"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+norn-core = { path = "../norn-core" }
+serde.workspace = true
+tracing.workspace = true

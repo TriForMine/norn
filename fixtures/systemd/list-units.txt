@@ -1,0 +1,6 @@
+UNIT                         LOAD   ACTIVE SUB     DESCRIPTION
+nginx.service                loaded active running A high performance web server and reverse proxy
+postgresql.service           loaded active running PostgreSQL RDBMS
+ssh.service                  loaded active running OpenBSD Secure Shell server
+cron.service                 loaded active running Regular background program processing daemon
+inactive-example.service     loaded inactive dead    Example inactive service

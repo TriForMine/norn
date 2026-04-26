@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    name: Linux x86_64 release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.20
+      - uses: Swatinem/rust-cache@v2
+      - name: Build dashboard
+        working-directory: apps/web
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+      - name: Build binary
+        run: cargo build --release -p norn-cli
+      - name: Package
+        run: |
+          mkdir -p dist/norn-${{ github.ref_name }}-linux-x86_64
+          cp target/release/norn dist/norn-${{ github.ref_name }}-linux-x86_64/
+          cp -r apps/web/dist dist/norn-${{ github.ref_name }}-linux-x86_64/web
+          cp README.md LICENSE dist/norn-${{ github.ref_name }}-linux-x86_64/
+          tar -czf norn-${{ github.ref_name }}-linux-x86_64.tar.gz -C dist norn-${{ github.ref_name }}-linux-x86_64
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: norn-${{ github.ref_name }}-linux-x86_64.tar.gz
+          generate_release_notes: true
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: true
+          tags: ghcr.io/${{ github.repository }}:${{ github.ref_name }}

@@ -1,0 +1,15 @@
+[package]
+name = "norn-collector-ports"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Listening port collector for Norn"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+norn-core = { path = "../norn-core" }
+tokio.workspace = true
+tracing.workspace = true

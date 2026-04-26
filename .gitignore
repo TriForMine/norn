@@ -1,0 +1,11 @@
+/target/
+/apps/web/node_modules/
+/apps/web/dist/
+/apps/web/coverage/
+/.idea/
+/.vscode/
+*.log
+*.db
+*.sqlite
+*.sqlite3
+/.env

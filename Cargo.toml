@@ -1,0 +1,53 @@
+[workspace]
+members = [
+    "crates/norn-api",
+    "crates/norn-cli",
+    "crates/norn-collector-docker",
+    "crates/norn-collector-packages",
+    "crates/norn-collector-ports",
+    "crates/norn-collector-systemd",
+    "crates/norn-core",
+    "crates/norn-db",
+    "crates/norn-inventory",
+    "crates/norn-notify",
+    "crates/norn-risk",
+    "crates/norn-scanner-grype",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.78"
+license = "Apache-2.0"
+authors = ["Norn contributors"]
+repository = "https://github.com/example/norn"
+homepage = "https://github.com/example/norn"
+description = "A modular runtime vulnerability monitor for Linux servers"
+readme = "README.md"
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+axum = "0.7"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+hostname = "0.4"
+humantime-serde = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled", "chrono", "serde_json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "1"
+tokio = { version = "1", features = ["fs", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
+toml = "0.8"
+tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "symbols"

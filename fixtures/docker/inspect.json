@@ -1,0 +1,144 @@
+[
+  {
+    "Id": "1111111111111111111111111111111111111111111111111111111111111111",
+    "Name": "/norn-nginx",
+    "Config": {
+      "Image": "nginx:1.25.3",
+      "Labels": {
+        "com.example.owner": "platform",
+        "norn.service": "edge"
+      }
+    },
+    "State": {
+      "Running": true,
+      "Status": "running"
+    },
+    "HostConfig": {
+      "Privileged": false,
+      "Binds": [],
+      "PortBindings": {
+        "80/tcp": [
+          {
+            "HostIp": "0.0.0.0",
+            "HostPort": "8080"
+          }
+        ],
+        "443/tcp": [
+          {
+            "HostIp": "::",
+            "HostPort": "8443"
+          }
+        ]
+      }
+    },
+    "Mounts": [],
+    "NetworkSettings": {
+      "Ports": {
+        "80/tcp": [
+          {
+            "HostIp": "0.0.0.0",
+            "HostPort": "8080"
+          }
+        ],
+        "443/tcp": [
+          {
+            "HostIp": "::",
+            "HostPort": "8443"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "Id": "2222222222222222222222222222222222222222222222222222222222222222",
+    "Name": "/norn-postgres",
+    "Config": {
+      "Image": "postgres:15.4",
+      "Labels": {
+        "com.example.owner": "data"
+      }
+    },
+    "State": {
+      "Running": true,
+      "Status": "running"
+    },
+    "HostConfig": {
+      "Privileged": false,
+      "Binds": [],
+      "PortBindings": {}
+    },
+    "Mounts": [],
+    "NetworkSettings": {
+      "Ports": {
+        "5432/tcp": null
+      }
+    }
+  },
+  {
+    "Id": "3333333333333333333333333333333333333333333333333333333333333333",
+    "Name": "/norn-privileged-worker",
+    "Config": {
+      "Image": "example/worker:2.0",
+      "Labels": {}
+    },
+    "State": {
+      "Running": true,
+      "Status": "running"
+    },
+    "HostConfig": {
+      "Privileged": true,
+      "Binds": [],
+      "PortBindings": {}
+    },
+    "Mounts": [],
+    "NetworkSettings": {
+      "Ports": {}
+    }
+  },
+  {
+    "Id": "4444444444444444444444444444444444444444444444444444444444444444",
+    "Name": "/norn-build-agent",
+    "Config": {
+      "Image": "example/build-agent:1.0",
+      "Labels": {
+        "ci": "true"
+      }
+    },
+    "State": {
+      "Running": true,
+      "Status": "running"
+    },
+    "HostConfig": {
+      "Privileged": false,
+      "Binds": [
+        "/var/run/docker.sock:/var/run/docker.sock"
+      ],
+      "PortBindings": {
+        "9000/tcp": [
+          {
+            "HostIp": "127.0.0.1",
+            "HostPort": "9000"
+          }
+        ]
+      }
+    },
+    "Mounts": [
+      {
+        "Type": "bind",
+        "Source": "/var/run/docker.sock",
+        "Destination": "/var/run/docker.sock",
+        "RW": true
+      }
+    ],
+    "NetworkSettings": {
+      "Ports": {
+        "9000/tcp": [
+          {
+            "HostIp": "127.0.0.1",
+            "HostPort": "9000"
+          }
+        ]
+      }
+    }
+  }
+]

@@ -1,0 +1,40 @@
+[server]
+bind = "127.0.0.1:8787"
+static_dir = "apps/web/dist"
+
+[database]
+url = "sqlite://./data/norn.db"
+
+[scan]
+interval = "6h"
+run_on_start = true
+
+[collectors.docker]
+enabled = true
+socket = "/var/run/docker.sock"
+fixture_path = "fixtures/docker/inspect.json"
+
+[collectors.systemd]
+enabled = true
+fixture_path = "fixtures/systemd/list-units.txt"
+
+[collectors.packages]
+enabled = true
+fixture_path = "fixtures/packages/dpkg-status.txt"
+
+[collectors.ports]
+enabled = true
+fixture_path = "fixtures/ports/ss-listening.txt"
+
+[scanner.grype]
+enabled = true
+binary = "grype"
+timeout_seconds = 300
+fixture_path = "fixtures/grype/output.json"
+
+[notifications.discord]
+enabled = false
+webhook_url = ""
+
+[risk]
+notify_minimum = "High"

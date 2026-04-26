@@ -1,0 +1,62 @@
+{
+  "matches": [
+    {
+      "vulnerability": {
+        "id": "CVE-2026-0001",
+        "severity": "Critical",
+        "description": "Fake critical remote code execution in nginx.",
+        "fix": {
+          "versions": ["1.25.4"],
+          "state": "fixed"
+        },
+        "urls": ["https://example.test/CVE-2026-0001"],
+        "cvss": [
+          {
+            "metrics": {
+              "baseScore": 9.8
+            }
+          }
+        ]
+      },
+      "artifact": {
+        "name": "nginx",
+        "version": "1.25.3",
+        "type": "deb"
+      }
+    },
+    {
+      "vulnerability": {
+        "id": "CVE-2026-0002",
+        "severity": "High",
+        "description": "Fake high severity library vulnerability.",
+        "fix": {
+          "versions": [],
+          "state": "not-fixed"
+        },
+        "urls": ["https://example.test/CVE-2026-0002"]
+      },
+      "artifact": {
+        "name": "openssl",
+        "version": "3.0.11",
+        "type": "deb"
+      }
+    },
+    {
+      "vulnerability": {
+        "id": "GHSA-norn-medium",
+        "severity": "Medium",
+        "description": "Fake medium vulnerability with a fix.",
+        "fix": {
+          "versions": ["2.1.0"],
+          "state": "fixed"
+        },
+        "urls": []
+      },
+      "artifact": {
+        "name": "worker-lib",
+        "version": "2.0.0",
+        "type": "binary"
+      }
+    }
+  ]
+}
