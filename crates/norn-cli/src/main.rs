@@ -1,9 +1,24 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    cmp::Reverse,
+    collections::HashMap,
+    io::{self, Stdout},
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
+use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table as ComfyTable};
+use console::{style as console_style, Term};
+use crossterm::{
+    event::{self, Event, KeyCode},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use norn_api::{serve, ApiState};
 use norn_collector_docker::DockerCollector;
 use norn_collector_packages::PackageCollector;
@@ -11,14 +26,23 @@ use norn_collector_ports::PortCollector;
 use norn_collector_systemd::SystemdCollector;
 use norn_core::{
     Exposure, IgnoredFinding, InventoryItem, NornConfig, NotificationEvent, Notifier, RiskLevel,
-    ScanOutcome, ScanRecord, ScanRunner, ScannerError, VulnerabilityScanner, DEFAULT_CONFIG_PATH,
+    ScanOutcome, ScanRecord, ScanRunner, ScanTarget, ScannerError, ServiceSummary, Summary,
+    VulnerabilityFinding, VulnerabilityScanner, VulnerabilitySummary, DEFAULT_CONFIG_PATH,
 };
 use norn_db::Database;
-use norn_inventory::{scan_targets, scan_targets_from_inventory, CollectorRegistry};
+use norn_inventory::{scan_targets_from_inventory, CollectorRegistry};
 use norn_notify::DiscordNotifier;
 use norn_risk::evaluate_finding;
 use norn_scanner_grype::GrypeScanner;
-use tracing::{error, info, warn};
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::{Alignment, Constraint, Direction, Layout},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Row, Table as TuiTable},
+    Frame, Terminal,
+};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Parser)]
 #[command(name = "norn")]
@@ -33,9 +57,15 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// Run inventory collection and vulnerability scanning once.
-    Scan,
+    Scan {
+        /// Disable interactive progress bars.
+        #[arg(long)]
+        no_progress: bool,
+    },
     /// Start the scheduler, API, and dashboard server.
     Serve,
+    /// Open the terminal dashboard.
+    Tui,
     /// Print current inventory without storing a scan.
     Inventory {
         #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
@@ -91,9 +121,9 @@ async fn main() -> Result<()> {
     let notifier = build_notifier(&config);
 
     match cli.command {
-        Commands::Scan => {
+        Commands::Scan { no_progress } => {
             let runner = LocalScanRunner::new(config, db, host, notifier);
-            let outcome = runner.run_scan().await?;
+            let outcome = runner.run_scan_interactive(!no_progress).await?;
             print_scan_summary(&outcome);
         }
         Commands::Serve => {
@@ -115,6 +145,10 @@ async fn main() -> Result<()> {
             state.runner = Some(runner);
             state.notifier = notifier;
             serve(&config.server.bind, &config.server.static_dir, state).await?;
+        }
+        Commands::Tui => {
+            let runner = LocalScanRunner::new(config, db.clone(), host, notifier);
+            run_tui(db, runner).await?;
         }
         Commands::Inventory { output } => {
             let registry = build_collectors(&config);
@@ -199,16 +233,33 @@ impl LocalScanRunner {
 #[async_trait]
 impl ScanRunner for LocalScanRunner {
     async fn run_scan(&self) -> Result<ScanOutcome> {
+        self.run_scan_internal(ScanProgress::disabled()).await
+    }
+}
+
+impl LocalScanRunner {
+    async fn run_scan_interactive(&self, show_progress: bool) -> Result<ScanOutcome> {
+        self.run_scan_internal(ScanProgress::new(show_progress))
+            .await
+    }
+
+    async fn run_scan_internal(&self, progress: ScanProgress) -> Result<ScanOutcome> {
         let scan = self.db.create_scan(&self.host)?;
         info!(scan_id = scan.id, host = self.host, "scan started");
 
         let registry = build_collectors(&self.config);
+        let inventory_progress = progress.spinner("Collecting runtime inventory");
         let (inventory, mut errors) = registry.collect().await;
+        inventory_progress
+            .finish_with_message(format!("Collected {} inventory items", inventory.len()));
+
         let targets = scan_targets_from_inventory(&inventory);
         let scanners = build_scanners(&self.config);
-        let (findings, scanner_errors) = scan_targets(&scanners, &targets).await;
+        let (findings, scanner_errors) =
+            scan_targets_with_progress(&scanners, &targets, &progress).await;
         errors.extend(scanner_errors);
 
+        let risk_progress = progress.spinner("Evaluating runtime risk");
         let inventory_by_id = inventory
             .iter()
             .map(|item| (item.id.clone(), item))
@@ -228,14 +279,22 @@ impl ScanRunner for LocalScanRunner {
             }
             risks.push(evaluate_finding(finding, item));
         }
+        risk_progress.finish_with_message(format!("Evaluated {} runtime risks", risks.len()));
 
+        let notification_progress = progress.spinner("Preparing notifications");
         let risk_events = self.notification_events_for_risks(&scan, &inventory_by_id, &risks)?;
         let container_events =
             self.notification_events_for_sensitive_containers(&scan, &inventory)?;
+        notification_progress.finish_with_message(format!(
+            "Prepared {} notifications",
+            risk_events.len() + container_events.len()
+        ));
 
+        let storage_progress = progress.spinner("Storing scan results");
         self.db.insert_inventory(&scan.id, &inventory)?;
         self.db.insert_findings(&scan.id, &findings)?;
         self.db.insert_risks(&scan.id, &risks)?;
+        storage_progress.finish_with_message("Stored scan results");
 
         for event in risk_events.into_iter().chain(container_events) {
             self.send_notification(&scan.id, event).await;
@@ -264,9 +323,7 @@ impl ScanRunner for LocalScanRunner {
             summary,
         })
     }
-}
 
-impl LocalScanRunner {
     fn notification_events_for_risks(
         &self,
         scan: &ScanRecord,
@@ -371,6 +428,100 @@ impl LocalScanRunner {
     }
 }
 
+struct ScanProgress {
+    multi: MultiProgress,
+}
+
+impl ScanProgress {
+    fn new(show_progress: bool) -> Self {
+        let draw_target = if show_progress && Term::stderr().is_term() {
+            ProgressDrawTarget::stderr()
+        } else {
+            ProgressDrawTarget::hidden()
+        };
+        Self {
+            multi: MultiProgress::with_draw_target(draw_target),
+        }
+    }
+
+    fn disabled() -> Self {
+        Self {
+            multi: MultiProgress::with_draw_target(ProgressDrawTarget::hidden()),
+        }
+    }
+
+    fn spinner(&self, message: impl Into<String>) -> ProgressBar {
+        let progress = self.multi.add(ProgressBar::new_spinner());
+        progress.set_style(
+            ProgressStyle::with_template("{spinner:.cyan} {msg}")
+                .expect("progress spinner template is valid"),
+        );
+        progress.set_message(message.into());
+        progress.enable_steady_tick(Duration::from_millis(100));
+        progress
+    }
+
+    fn bar(&self, length: u64, message: impl Into<String>) -> ProgressBar {
+        let progress = self.multi.add(ProgressBar::new(length));
+        progress.set_style(
+            ProgressStyle::with_template(
+                "{msg} [{bar:40.cyan/blue}] {pos}/{len} {elapsed_precise}",
+            )
+            .expect("progress bar template is valid")
+            .progress_chars("=> "),
+        );
+        progress.set_message(message.into());
+        progress
+    }
+}
+
+async fn scan_targets_with_progress(
+    scanners: &[Box<dyn VulnerabilityScanner>],
+    targets: &[ScanTarget],
+    progress: &ScanProgress,
+) -> (Vec<VulnerabilityFinding>, Vec<ScannerError>) {
+    let mut findings = Vec::new();
+    let mut errors = Vec::new();
+    let total = targets.len().saturating_mul(scanners.len()) as u64;
+    let scan_progress = progress.bar(total, "Scanning vulnerability targets");
+
+    if total == 0 {
+        scan_progress.finish_with_message("No vulnerability targets");
+        return (findings, errors);
+    }
+
+    for target in targets {
+        for scanner in scanners {
+            scan_progress.set_message(format!("Scanning {} with {}", target.name, scanner.name()));
+            debug!(
+                scanner = scanner.name(),
+                target = target.reference,
+                "running vulnerability scanner"
+            );
+            match scanner.scan(target.clone()).await {
+                Ok(mut target_findings) => findings.append(&mut target_findings),
+                Err(error) => {
+                    warn!(
+                        scanner = scanner.name(),
+                        target = target.reference,
+                        error = %error,
+                        "scanner failed for target"
+                    );
+                    errors.push(ScannerError {
+                        scanner: scanner.name().to_string(),
+                        target: target.reference.clone(),
+                        message: error.to_string(),
+                    });
+                }
+            }
+            scan_progress.inc(1);
+        }
+    }
+
+    scan_progress.finish_with_message(format!("Scanned {total} target checks"));
+    (findings, errors)
+}
+
 fn build_collectors(config: &NornConfig) -> CollectorRegistry {
     let mut registry = CollectorRegistry::new();
 
@@ -469,8 +620,312 @@ fn scan_record_with_errors(
     scan
 }
 
+struct TuiSnapshot {
+    summary: Summary,
+    services: Vec<ServiceSummary>,
+    vulnerabilities: Vec<VulnerabilitySummary>,
+    scans: Vec<ScanRecord>,
+}
+
+async fn run_tui(db: Database, runner: LocalScanRunner) -> Result<()> {
+    let (mut terminal, _guard) = enter_tui()?;
+    let mut status = "q quit | r run scan".to_string();
+
+    loop {
+        let snapshot = load_tui_snapshot(&db)?;
+        terminal.draw(|frame| draw_tui(frame, &snapshot, &status))?;
+
+        if !event::poll(Duration::from_millis(250))? {
+            continue;
+        }
+
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => break,
+            KeyCode::Char('r') => {
+                status = "Running scan...".to_string();
+                let snapshot = load_tui_snapshot(&db)?;
+                terminal.draw(|frame| draw_tui(frame, &snapshot, &status))?;
+                status = match runner.run_scan().await {
+                    Ok(outcome) => format!(
+                        "Scan completed: {} inventory, {} findings, {} errors",
+                        outcome.scan.inventory_count,
+                        outcome.scan.finding_count,
+                        outcome.scan.scanner_errors.len()
+                    ),
+                    Err(error) => format!("Scan failed: {error}"),
+                };
+            }
+            _ => {}
+        }
+    }
+
+    terminal.show_cursor()?;
+    Ok(())
+}
+
+fn enter_tui() -> Result<(Terminal<CrosstermBackend<Stdout>>, TerminalGuard)> {
+    enable_raw_mode().context("failed to enable terminal raw mode")?;
+    let mut stdout = io::stdout();
+    if let Err(error) = execute!(stdout, EnterAlternateScreen) {
+        let _ = disable_raw_mode();
+        return Err(error).context("failed to enter terminal alternate screen");
+    }
+
+    let backend = CrosstermBackend::new(stdout);
+    match Terminal::new(backend) {
+        Ok(terminal) => Ok((terminal, TerminalGuard)),
+        Err(error) => {
+            restore_terminal();
+            Err(error).context("failed to initialize terminal UI")
+        }
+    }
+}
+
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        restore_terminal();
+    }
+}
+
+fn restore_terminal() {
+    let _ = disable_raw_mode();
+    let mut stdout = io::stdout();
+    let _ = execute!(stdout, LeaveAlternateScreen);
+}
+
+fn load_tui_snapshot(db: &Database) -> Result<TuiSnapshot> {
+    let mut services = db.service_summaries()?;
+    services.sort_by_key(|service| {
+        (
+            Reverse(service.highest_risk.map(|risk| risk.score()).unwrap_or(0)),
+            Reverse(service.vulnerability_count),
+            service.name.clone(),
+        )
+    });
+
+    let mut vulnerabilities = db.vulnerability_summaries()?;
+    vulnerabilities.sort_by_key(|vulnerability| {
+        (
+            Reverse(vulnerability.runtime_risk.score()),
+            vulnerability.affected_service.clone(),
+            vulnerability.vulnerability_id.clone(),
+        )
+    });
+
+    Ok(TuiSnapshot {
+        summary: db.summary()?,
+        services,
+        vulnerabilities,
+        scans: db.list_scans()?,
+    })
+}
+
+fn draw_tui(frame: &mut Frame<'_>, snapshot: &TuiSnapshot, status: &str) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(7),
+            Constraint::Min(10),
+            Constraint::Length(7),
+            Constraint::Length(3),
+        ])
+        .split(frame.area());
+
+    frame.render_widget(overview_widget(&snapshot.summary), rows[0]);
+
+    let main = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(rows[1]);
+    frame.render_widget(services_widget(&snapshot.services), main[0]);
+    frame.render_widget(vulnerabilities_widget(&snapshot.vulnerabilities), main[1]);
+
+    frame.render_widget(scans_widget(&snapshot.scans), rows[2]);
+    frame.render_widget(footer_widget(status), rows[3]);
+}
+
+fn overview_widget(summary: &Summary) -> Paragraph<'_> {
+    let last_scan = summary
+        .last_scan_time
+        .map(format_tui_time)
+        .unwrap_or_else(|| "never".to_string());
+    Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled(
+                "Norn",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!(" | Last scan: {last_scan}")),
+        ]),
+        Line::from(format!(
+            "Running containers: {} | Active services: {} | Public services: {}",
+            summary.running_containers, summary.running_services, summary.public_services
+        )),
+        Line::from(vec![
+            risk_count_span("Critical", summary.critical_risks, Color::Red),
+            Span::raw("  "),
+            risk_count_span("High", summary.high_risks, Color::LightRed),
+            Span::raw("  "),
+            risk_count_span("Medium", summary.medium_risks, Color::Yellow),
+            Span::raw("  "),
+            risk_count_span("Low", summary.low_risks, Color::Blue),
+        ]),
+    ])
+    .block(Block::default().title("Overview").borders(Borders::ALL))
+    .alignment(Alignment::Left)
+}
+
+fn services_widget(services: &[ServiceSummary]) -> List<'_> {
+    let items = services
+        .iter()
+        .take(12)
+        .map(|service| {
+            let risk = service
+                .highest_risk
+                .map(|risk| risk.as_str().to_string())
+                .unwrap_or_else(|| "None".to_string());
+            ListItem::new(Line::from(vec![
+                Span::styled(&service.name, risk_style_option(service.highest_risk)),
+                Span::raw(format!(
+                    " | {} | {:?} | {} vuln | {}",
+                    service.source, service.status, service.vulnerability_count, risk
+                )),
+            ]))
+        })
+        .collect::<Vec<_>>();
+
+    empty_list_fallback(items, "No services from a completed scan").block(
+        Block::default()
+            .title("Services")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray)),
+    )
+}
+
+fn vulnerabilities_widget(vulnerabilities: &[VulnerabilitySummary]) -> List<'_> {
+    let items = vulnerabilities
+        .iter()
+        .take(12)
+        .map(|vulnerability| {
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    &vulnerability.vulnerability_id,
+                    risk_style(vulnerability.runtime_risk),
+                ),
+                Span::raw(format!(
+                    " | {} | {} | fix {:?}",
+                    vulnerability.affected_service,
+                    vulnerability.exposed,
+                    vulnerability.fix_available
+                )),
+            ]))
+        })
+        .collect::<Vec<_>>();
+
+    empty_list_fallback(items, "No runtime risks from a completed scan").block(
+        Block::default()
+            .title("Vulnerabilities")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray)),
+    )
+}
+
+fn scans_widget(scans: &[ScanRecord]) -> TuiTable<'_> {
+    let rows = scans.iter().take(4).map(|scan| {
+        Row::new(vec![
+            short_id(&scan.id),
+            scan.status.clone(),
+            scan.inventory_count.to_string(),
+            scan.finding_count.to_string(),
+            scan.scanner_errors.len().to_string(),
+            scan.completed_at
+                .or(Some(scan.started_at))
+                .map(format_tui_time)
+                .unwrap_or_else(|| "unknown".to_string()),
+        ])
+    });
+
+    TuiTable::new(
+        rows,
+        [
+            Constraint::Length(10),
+            Constraint::Length(22),
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(8),
+            Constraint::Min(16),
+        ],
+    )
+    .header(
+        Row::new(vec![
+            "Scan",
+            "Status",
+            "Inventory",
+            "Findings",
+            "Errors",
+            "Time",
+        ])
+        .style(Style::default().add_modifier(Modifier::BOLD)),
+    )
+    .block(Block::default().title("Scan History").borders(Borders::ALL))
+}
+
+fn footer_widget(status: &str) -> Paragraph<'_> {
+    Paragraph::new(status.to_string())
+        .block(Block::default().borders(Borders::ALL))
+        .alignment(Alignment::Center)
+}
+
+fn empty_list_fallback<'a>(items: Vec<ListItem<'a>>, fallback: &'a str) -> List<'a> {
+    if items.is_empty() {
+        List::new(vec![ListItem::new(fallback)])
+    } else {
+        List::new(items)
+    }
+}
+
+fn risk_count_span(label: &'static str, count: usize, color: Color) -> Span<'static> {
+    Span::styled(
+        format!("{label}: {count}"),
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    )
+}
+
+fn risk_style(risk: RiskLevel) -> Style {
+    let color = match risk {
+        RiskLevel::Critical => Color::Red,
+        RiskLevel::High => Color::LightRed,
+        RiskLevel::Medium => Color::Yellow,
+        RiskLevel::Low => Color::Blue,
+        RiskLevel::Informational => Color::Gray,
+    };
+    Style::default().fg(color).add_modifier(Modifier::BOLD)
+}
+
+fn risk_style_option(risk: Option<RiskLevel>) -> Style {
+    risk.map(risk_style)
+        .unwrap_or_else(|| Style::default().fg(Color::Gray))
+}
+
+fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+fn format_tui_time(time: DateTime<Utc>) -> String {
+    time.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+}
+
 fn print_scan_summary(outcome: &ScanOutcome) {
-    println!("Host: {}", outcome.scan.host);
+    println!("{}", console_style("Scan summary").bold());
+    println!("Host: {}", console_style(&outcome.scan.host).cyan());
     println!("Running containers: {}", outcome.summary.running_containers);
     println!("Active services: {}", outcome.summary.running_services);
     println!("Public services: {}", outcome.summary.public_services);
@@ -480,8 +935,12 @@ fn print_scan_summary(outcome: &ScanOutcome) {
     println!("Low runtime risks: {}", outcome.summary.low_risks);
     if !outcome.scan.scanner_errors.is_empty() {
         println!(
-            "Scanner/collector errors: {}",
-            outcome.scan.scanner_errors.len()
+            "{}",
+            console_style(format!(
+                "Scanner/collector errors: {}",
+                outcome.scan.scanner_errors.len()
+            ))
+            .yellow()
         );
     }
 }
@@ -490,19 +949,20 @@ fn print_inventory(items: &[InventoryItem], output: OutputFormat) -> Result<()> 
     match output {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(items)?),
         OutputFormat::Table => {
-            println!(
-                "{:<28} {:<12} {:<12} {:<10}",
-                "NAME", "SOURCE", "STATUS", "EXPOSURE"
-            );
+            let mut table = ComfyTable::new();
+            table
+                .load_preset(UTF8_FULL)
+                .set_content_arrangement(ContentArrangement::Dynamic)
+                .set_header(vec!["Name", "Source", "Status", "Exposure"]);
             for item in items {
-                println!(
-                    "{:<28} {:<12} {:<12?} {:<10}",
-                    item.name,
+                table.add_row(vec![
+                    item.name.clone(),
                     item.source.to_string(),
-                    item.status,
-                    item.exposure
-                );
+                    format!("{:?}", item.status),
+                    item.exposure.to_string(),
+                ]);
             }
+            println!("{table}");
         }
     }
     Ok(())

@@ -23,6 +23,7 @@ The MVP includes a React dashboard with summary cards, services, vulnerabilities
 - Runtime risk engine that considers severity, public exposure, container privilege, Docker socket mounts, and fix availability.
 - SQLite scan history with versioned migration SQL.
 - Axum REST API and Vite/React dashboard with persisted light/dark theme support.
+- Polished terminal output with scan progress, readable tables, and an interactive TUI.
 - Discord webhook notifications.
 - Fixture-first tests that do not require Docker, systemd, dpkg, `ss`, or Grype.
 
@@ -76,6 +77,8 @@ Open `http://127.0.0.1:8787`.
 
 ```bash
 norn scan --config /etc/norn/config.toml
+norn scan --config /etc/norn/config.toml --no-progress
+norn tui --config /etc/norn/config.toml
 norn serve --config /etc/norn/config.toml
 norn inventory --config /etc/norn/config.toml --output table
 norn report --config /etc/norn/config.toml

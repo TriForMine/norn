@@ -15,7 +15,11 @@ anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 clap.workspace = true
+comfy-table.workspace = true
+console.workspace = true
+crossterm.workspace = true
 hostname.workspace = true
+indicatif.workspace = true
 norn-api = { path = "../norn-api" }
 norn-collector-docker = { path = "../norn-collector-docker" }
 norn-collector-packages = { path = "../norn-collector-packages" }
@@ -27,6 +31,7 @@ norn-inventory = { path = "../norn-inventory" }
 norn-notify = { path = "../norn-notify" }
 norn-risk = { path = "../norn-risk" }
 norn-scanner-grype = { path = "../norn-scanner-grype" }
+ratatui.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
