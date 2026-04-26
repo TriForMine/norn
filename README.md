@@ -77,6 +77,7 @@ Open `http://127.0.0.1:8787`.
 
 ```bash
 norn scan --config /etc/norn/config.toml
+norn scan --config /etc/norn/config.toml --jobs 8
 norn scan --config /etc/norn/config.toml --no-progress
 norn tui --config /etc/norn/config.toml
 norn serve --config /etc/norn/config.toml
@@ -114,6 +115,9 @@ url = "sqlite:///var/lib/norn/norn.db"
 interval = "6h"
 run_on_start = true
 
+[scanner]
+parallelism = 4
+
 [collectors.docker]
 enabled = true
 socket = "/var/run/docker.sock"
@@ -131,7 +135,7 @@ webhook_url = ""
 notify_minimum = "High"
 ```
 
-Environment overrides include `NORN_SERVER_BIND`, `NORN_DATABASE_URL`, `NORN_SCAN_INTERVAL`, `NORN_GRYPE_BINARY`, `NORN_DISCORD_ENABLED`, `NORN_DISCORD_WEBHOOK_URL`, and `NORN_RISK_NOTIFY_MINIMUM`.
+Environment overrides include `NORN_SERVER_BIND`, `NORN_DATABASE_URL`, `NORN_SCAN_INTERVAL`, `NORN_SCANNER_PARALLELISM`, `NORN_GRYPE_BINARY`, `NORN_DISCORD_ENABLED`, `NORN_DISCORD_WEBHOOK_URL`, and `NORN_RISK_NOTIFY_MINIMUM`.
 
 ## Docker Compose
 

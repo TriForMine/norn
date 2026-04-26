@@ -22,6 +22,9 @@ enabled = true
 [collectors.ports]
 enabled = true
 
+[scanner]
+parallelism = 4
+
 [scanner.grype]
 enabled = true
 binary = "grype"

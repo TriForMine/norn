@@ -61,6 +61,9 @@ enum Commands {
         /// Disable interactive progress bars.
         #[arg(long)]
         no_progress: bool,
+        /// Override scanner concurrency for this run.
+        #[arg(long, value_parser = parse_positive_usize)]
+        jobs: Option<usize>,
     },
     /// Start the scheduler, API, and dashboard server.
     Serve,
@@ -102,6 +105,17 @@ enum OutputFormat {
     Table,
 }
 
+fn parse_positive_usize(value: &str) -> std::result::Result<usize, String> {
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|error| format!("invalid number '{value}': {error}"))?;
+    if parsed == 0 {
+        Err("value must be at least 1".to_string())
+    } else {
+        Ok(parsed)
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -112,7 +126,7 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let config = NornConfig::load(Some(&cli.config))
+    let mut config = NornConfig::load(Some(&cli.config))
         .with_context(|| format!("failed to load config {}", cli.config.display()))?;
     let db = Database::open_url(&config.database.url)?;
     let host = hostname::get()
@@ -121,7 +135,10 @@ async fn main() -> Result<()> {
     let notifier = build_notifier(&config);
 
     match cli.command {
-        Commands::Scan { no_progress } => {
+        Commands::Scan { no_progress, jobs } => {
+            if let Some(jobs) = jobs {
+                config.scanner.parallelism = jobs;
+            }
             let runner = LocalScanRunner::new(config, db, host, notifier);
             let outcome = runner.run_scan_interactive(!no_progress).await?;
             print_scan_summary(&outcome);
@@ -255,8 +272,13 @@ impl LocalScanRunner {
 
         let targets = scan_targets_from_inventory(&inventory);
         let scanners = build_scanners(&self.config);
-        let (findings, scanner_errors) =
-            scan_targets_with_progress(&scanners, &targets, &progress).await;
+        let (findings, scanner_errors) = scan_targets_with_progress(
+            &scanners,
+            &targets,
+            self.config.scanner.parallelism(),
+            &progress,
+        )
+        .await;
         errors.extend(scanner_errors);
 
         let risk_progress = progress.spinner("Evaluating runtime risk");
@@ -476,50 +498,99 @@ impl ScanProgress {
 }
 
 async fn scan_targets_with_progress(
-    scanners: &[Box<dyn VulnerabilityScanner>],
+    scanners: &[Arc<dyn VulnerabilityScanner>],
     targets: &[ScanTarget],
+    parallelism: usize,
     progress: &ScanProgress,
 ) -> (Vec<VulnerabilityFinding>, Vec<ScannerError>) {
     let mut findings = Vec::new();
     let mut errors = Vec::new();
     let total = targets.len().saturating_mul(scanners.len()) as u64;
-    let scan_progress = progress.bar(total, "Scanning vulnerability targets");
+    let parallelism = parallelism.max(1);
+    let scan_progress = progress.bar(
+        total,
+        format!("Scanning vulnerability targets ({parallelism} jobs)"),
+    );
 
     if total == 0 {
         scan_progress.finish_with_message("No vulnerability targets");
         return (findings, errors);
     }
 
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(parallelism));
+    let mut tasks = tokio::task::JoinSet::new();
+
     for target in targets {
         for scanner in scanners {
-            scan_progress.set_message(format!("Scanning {} with {}", target.name, scanner.name()));
-            debug!(
-                scanner = scanner.name(),
-                target = target.reference,
-                "running vulnerability scanner"
-            );
-            match scanner.scan(target.clone()).await {
-                Ok(mut target_findings) => findings.append(&mut target_findings),
-                Err(error) => {
-                    warn!(
-                        scanner = scanner.name(),
-                        target = target.reference,
-                        error = %error,
-                        "scanner failed for target"
-                    );
-                    errors.push(ScannerError {
-                        scanner: scanner.name().to_string(),
-                        target: target.reference.clone(),
-                        message: error.to_string(),
-                    });
+            let permit = semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("scanner semaphore is not closed");
+            let scanner = Arc::clone(scanner);
+            let target = target.clone();
+            let scan_progress = scan_progress.clone();
+            tasks.spawn(async move {
+                let _permit = permit;
+                let scanner_name = scanner.name();
+                scan_progress
+                    .set_message(format!("Scanning {} with {}", target.name, scanner_name));
+                debug!(
+                    scanner = scanner_name,
+                    target = %target.reference,
+                    "running vulnerability scanner"
+                );
+                let result = match scanner.scan(target.clone()).await {
+                    Ok(findings) => ScanJobResult {
+                        findings,
+                        error: None,
+                    },
+                    Err(error) => {
+                        warn!(
+                            scanner = scanner_name,
+                            target = %target.reference,
+                            error = %error,
+                            "scanner failed for target"
+                        );
+                        ScanJobResult {
+                            findings: Vec::new(),
+                            error: Some(ScannerError {
+                                scanner: scanner_name.to_string(),
+                                target: target.reference,
+                                message: error.to_string(),
+                            }),
+                        }
+                    }
+                };
+                scan_progress.inc(1);
+                result
+            });
+        }
+    }
+
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok(mut scan_result) => {
+                findings.append(&mut scan_result.findings);
+                if let Some(error) = scan_result.error {
+                    errors.push(error);
                 }
             }
-            scan_progress.inc(1);
+            Err(error) => errors.push(ScannerError {
+                scanner: "scanner-task".to_string(),
+                target: "unknown".to_string(),
+                message: error.to_string(),
+            }),
         }
     }
 
     scan_progress.finish_with_message(format!("Scanned {total} target checks"));
     (findings, errors)
+}
+
+struct ScanJobResult {
+    findings: Vec<VulnerabilityFinding>,
+    error: Option<ScannerError>,
 }
 
 fn build_collectors(config: &NornConfig) -> CollectorRegistry {
@@ -560,18 +631,18 @@ fn build_collectors(config: &NornConfig) -> CollectorRegistry {
     registry
 }
 
-fn build_scanners(config: &NornConfig) -> Vec<Box<dyn VulnerabilityScanner>> {
-    let mut scanners: Vec<Box<dyn VulnerabilityScanner>> = Vec::new();
+fn build_scanners(config: &NornConfig) -> Vec<Arc<dyn VulnerabilityScanner>> {
+    let mut scanners: Vec<Arc<dyn VulnerabilityScanner>> = Vec::new();
     if config.scanner.grype.enabled {
         let timeout = Duration::from_secs(config.scanner.grype.timeout_seconds);
         if let Some(path) = &config.scanner.grype.fixture_path {
-            scanners.push(Box::new(GrypeScanner::with_fixture(
+            scanners.push(Arc::new(GrypeScanner::with_fixture(
                 &config.scanner.grype.binary,
                 timeout,
                 path,
             )));
         } else {
-            scanners.push(Box::new(GrypeScanner::new(
+            scanners.push(Arc::new(GrypeScanner::new(
                 &config.scanner.grype.binary,
                 timeout,
             )));

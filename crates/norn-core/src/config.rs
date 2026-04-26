@@ -53,6 +53,11 @@ impl NornConfig {
         if let Ok(value) = env::var("NORN_GRYPE_BINARY") {
             self.scanner.grype.binary = value;
         }
+        if let Ok(value) = env::var("NORN_SCANNER_PARALLELISM") {
+            if let Ok(parallelism) = value.parse::<usize>() {
+                self.scanner.parallelism = parallelism.max(1);
+            }
+        }
         if let Ok(value) = env::var("NORN_DISCORD_WEBHOOK_URL") {
             self.notifications.discord.webhook_url = value;
         }
@@ -167,10 +172,26 @@ impl Default for BasicCollectorConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ScannerConfig {
+    pub parallelism: usize,
     pub grype: GrypeConfig,
+}
+
+impl ScannerConfig {
+    pub fn parallelism(&self) -> usize {
+        self.parallelism.max(1)
+    }
+}
+
+impl Default for ScannerConfig {
+    fn default() -> Self {
+        Self {
+            parallelism: 4,
+            grype: GrypeConfig::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -262,6 +283,7 @@ mod tests {
     #[test]
     fn loads_config_and_applies_env_override() {
         env::set_var("NORN_SERVER_BIND", "127.0.0.1:9000");
+        env::set_var("NORN_SCANNER_PARALLELISM", "12");
         env::set_var("NORN_RISK_NOTIFY_MINIMUM", "Critical");
         let cfg = NornConfig::load_from_str(
             r#"
@@ -274,10 +296,12 @@ mod tests {
         )
         .unwrap();
         env::remove_var("NORN_SERVER_BIND");
+        env::remove_var("NORN_SCANNER_PARALLELISM");
         env::remove_var("NORN_RISK_NOTIFY_MINIMUM");
 
         assert_eq!(cfg.server.bind, "127.0.0.1:9000");
         assert_eq!(cfg.database.url, "sqlite://./norn.db");
+        assert_eq!(cfg.scanner.parallelism(), 12);
         assert_eq!(cfg.risk.notify_minimum, RiskLevel::Critical);
     }
 

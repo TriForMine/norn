@@ -26,6 +26,9 @@ fixture_path = "fixtures/packages/dpkg-status.txt"
 enabled = true
 fixture_path = "fixtures/ports/ss-listening.txt"
 
+[scanner]
+parallelism = 4
+
 [scanner.grype]
 enabled = true
 binary = "grype"
