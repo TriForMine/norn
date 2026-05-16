@@ -65,9 +65,11 @@ jobs:
       - name: Install system dependencies (RPM)
         if: matrix.family == 'rpm'
         run: |
-          # dnf is available on all three RPM images
+          # curl-minimal is pre-installed and conflicts with the full curl package;
+          # we don't need curl because reqwest uses rustls (bundled TLS).
+          # ca-certificates is already present in all three images.
           dnf install -y \
-            curl ca-certificates gcc pkg-config \
+            gcc pkg-config \
             openssl-devel git findutils
 
       - uses: actions/checkout@v4
