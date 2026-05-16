@@ -1261,11 +1261,12 @@ fn remediation_widget(items: &[RemediationItem]) -> List<'_> {
             ListItem::new(Line::from(vec![
                 Span::styled(&item.service, risk_style(item.highest_risk)),
                 Span::raw(format!(
-                    " | {} | {} vuln | {} fix | {} | {}",
+                    " | {} | {} vuln | {} fix | {} | {} | {}",
                     item.exposure,
                     item.vulnerability_count,
                     item.fixable_count,
                     item.highest_risk.as_str(),
+                    remediation_package_summary(item),
                     top
                 )),
             ]))
@@ -1278,6 +1279,27 @@ fn remediation_widget(items: &[RemediationItem]) -> List<'_> {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray)),
     )
+}
+
+fn remediation_package_summary(item: &RemediationItem) -> String {
+    let packages = item
+        .affected_packages
+        .iter()
+        .take(3)
+        .map(|package| {
+            let installed = package.installed_version.as_deref().unwrap_or("unknown");
+            let fixed = package.fixed_version.as_deref().unwrap_or("no fix");
+            format!(
+                "{} {installed} -> {fixed} ({} vuln)",
+                package.package_name, package.vulnerability_count
+            )
+        })
+        .collect::<Vec<_>>();
+    if packages.is_empty() {
+        "unknown package versions".to_string()
+    } else {
+        packages.join("; ")
+    }
 }
 
 fn scans_widget(scans: &[ScanRecord]) -> TuiTable<'_> {
@@ -1527,12 +1549,13 @@ fn render_markdown_report(report: &ReportDocument) -> String {
     } else {
         for item in report.remediation.iter().take(20) {
             output.push_str(&format!(
-                "- **{}**: {} risk, {} exposure, {} findings ({} fixable). Top: {}. {}\n",
+                "- **{}**: {} risk, {} exposure, {} findings ({} fixable). Packages: {}. Top: {}. {}\n",
                 item.service,
                 item.highest_risk.as_str(),
                 item.exposure,
                 item.vulnerability_count,
                 item.fixable_count,
+                remediation_package_summary(item),
                 item.top_vulnerabilities.join(", "),
                 item.recommended_action
             ));

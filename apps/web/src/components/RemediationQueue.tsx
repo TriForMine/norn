@@ -19,6 +19,7 @@ export function RemediationQueue({ items }: { items: RemediationItem[] }) {
             <th className="px-4 py-3">Exposure</th>
             <th className="px-4 py-3">Findings</th>
             <th className="px-4 py-3">Fixable</th>
+            <th className="px-4 py-3">Package versions</th>
             <th className="px-4 py-3">Top IDs</th>
             <th className="px-4 py-3">Action</th>
             <th className="px-4 py-3">Last seen</th>
@@ -48,6 +49,20 @@ export function RemediationQueue({ items }: { items: RemediationItem[] }) {
               </td>
               <td className="px-4 py-3 font-mono text-xs">
                 {item.fixable_count}
+              </td>
+              <td className="max-w-96 px-4 py-3 font-mono text-xs text-muted">
+                {item.affected_packages.length > 0
+                  ? item.affected_packages.slice(0, 3).map((pkg) => (
+                      <div key={`${pkg.package_name}:${pkg.installed_version ?? ""}:${pkg.fixed_version ?? ""}`}>
+                        <span className="font-semibold text-ink">
+                          {pkg.package_name}
+                        </span>{" "}
+                        {pkg.installed_version ?? "unknown"} -&gt;{" "}
+                        {pkg.fixed_version ?? "no fix"}{" "}
+                        <span>({pkg.vulnerability_count})</span>
+                      </div>
+                    ))
+                  : "unknown"}
               </td>
               <td className="max-w-72 truncate px-4 py-3 font-mono text-xs text-muted">
                 {item.top_vulnerabilities.slice(0, 5).join(", ") || "none"}

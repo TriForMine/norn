@@ -396,9 +396,20 @@ pub struct RemediationItem {
     pub low_count: usize,
     pub informational_count: usize,
     pub top_vulnerabilities: Vec<String>,
+    pub affected_packages: Vec<RemediationPackage>,
     pub first_seen: DateTime<Utc>,
     pub last_seen: DateTime<Utc>,
     pub recommended_action: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RemediationPackage {
+    pub package_name: String,
+    pub installed_version: Option<String>,
+    pub fixed_version: Option<String>,
+    pub vulnerability_count: usize,
+    pub fixable_count: usize,
+    pub highest_risk: RiskLevel,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

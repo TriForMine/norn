@@ -61,9 +61,19 @@ export interface RemediationItem {
   low_count: number;
   informational_count: number;
   top_vulnerabilities: string[];
+  affected_packages: RemediationPackage[];
   first_seen: string;
   last_seen: string;
   recommended_action: string;
+}
+
+export interface RemediationPackage {
+  package_name: string;
+  installed_version?: string | null;
+  fixed_version?: string | null;
+  vulnerability_count: number;
+  fixable_count: number;
+  highest_risk: RiskLevel;
 }
 
 export interface ScanStatus {

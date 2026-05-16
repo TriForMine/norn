@@ -9,8 +9,9 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use norn_core::{
     Exposure, FixAvailability, IgnoredFinding, InventoryItem, InventoryKind, InventorySource,
-    NotificationEvent, RemediationItem, RiskEvaluation, RiskLevel, RuntimeStatus, ScanRecord,
-    ScannerError, ServiceSummary, Summary, VulnerabilityFinding, VulnerabilitySummary,
+    NotificationEvent, RemediationItem, RemediationPackage, RiskEvaluation, RiskLevel,
+    RuntimeStatus, ScanRecord, ScannerError, ServiceSummary, Summary, VulnerabilityFinding,
+    VulnerabilitySummary,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
@@ -808,6 +809,7 @@ fn build_remediation_items(vulnerabilities: Vec<VulnerabilitySummary>) -> Vec<Re
                 .take(5)
                 .map(|vulnerability| vulnerability.vulnerability_id.clone())
                 .collect::<Vec<_>>();
+            let affected_packages = remediation_packages(&vulnerabilities);
 
             Some(RemediationItem {
                 service,
@@ -837,6 +839,7 @@ fn build_remediation_items(vulnerabilities: Vec<VulnerabilitySummary>) -> Vec<Re
                     .count(),
                 recommended_action: remediation_action(highest_risk, exposure, fixable_count),
                 top_vulnerabilities,
+                affected_packages,
                 first_seen,
                 last_seen,
             })
@@ -853,6 +856,65 @@ fn build_remediation_items(vulnerabilities: Vec<VulnerabilitySummary>) -> Vec<Re
         )
     });
     items
+}
+
+fn remediation_packages(vulnerabilities: &[VulnerabilitySummary]) -> Vec<RemediationPackage> {
+    let mut groups = std::collections::BTreeMap::<
+        (String, Option<String>, Option<String>),
+        Vec<&VulnerabilitySummary>,
+    >::new();
+    for vulnerability in vulnerabilities {
+        let Some(package_name) = vulnerability.package_name.as_ref() else {
+            continue;
+        };
+        groups
+            .entry((
+                package_name.clone(),
+                vulnerability.installed_version.clone(),
+                vulnerability.fixed_version.clone(),
+            ))
+            .or_default()
+            .push(vulnerability);
+    }
+
+    let mut packages = groups
+        .into_iter()
+        .map(
+            |((package_name, installed_version, fixed_version), vulnerabilities)| {
+                let highest_risk = vulnerabilities
+                    .iter()
+                    .map(|vulnerability| vulnerability.runtime_risk)
+                    .max_by_key(|risk| risk.score())
+                    .unwrap_or(RiskLevel::Informational);
+                let fixable_count = vulnerabilities
+                    .iter()
+                    .filter(|vulnerability| {
+                        vulnerability.fix_available == FixAvailability::Available
+                    })
+                    .count();
+                RemediationPackage {
+                    package_name,
+                    installed_version,
+                    fixed_version,
+                    vulnerability_count: vulnerabilities.len(),
+                    fixable_count,
+                    highest_risk,
+                }
+            },
+        )
+        .collect::<Vec<_>>();
+
+    packages.sort_by_key(|package| {
+        (
+            std::cmp::Reverse(package.highest_risk.score()),
+            std::cmp::Reverse(package.fixable_count),
+            std::cmp::Reverse(package.vulnerability_count),
+            package.package_name.clone(),
+            package.installed_version.clone(),
+        )
+    });
+    packages.truncate(5);
+    packages
 }
 
 fn exposure_priority(exposure: Exposure) -> u8 {
@@ -996,6 +1058,16 @@ mod tests {
         assert_eq!(items[1].fixable_count, 1);
         assert_eq!(items[1].high_count, 1);
         assert_eq!(items[1].medium_count, 1);
+        assert_eq!(items[1].affected_packages.len(), 1);
+        assert_eq!(items[1].affected_packages[0].package_name, "package");
+        assert_eq!(
+            items[1].affected_packages[0].installed_version.as_deref(),
+            Some("1.0.0")
+        );
+        assert_eq!(
+            items[1].affected_packages[0].fixed_version.as_deref(),
+            Some("1.0.1")
+        );
         assert!(items[1]
             .recommended_action
             .contains("public-facing service"));
