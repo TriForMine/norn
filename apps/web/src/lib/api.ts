@@ -1,5 +1,6 @@
 import type {
   ScanRecord,
+  ScanStatus,
   ServiceSummary,
   Summary,
   VulnerabilitySummary,
@@ -19,6 +20,7 @@ export const api = {
   vulnerabilities: () =>
     getJson<VulnerabilitySummary[]>("/api/vulnerabilities?limit=500"),
   scans: () => getJson<ScanRecord[]>("/api/scans"),
+  scanStatus: () => getJson<ScanStatus>("/api/scans/status"),
   runScan: async () => {
     const response = await fetch("/api/scans/run", { method: "POST" });
     if (!response.ok) {

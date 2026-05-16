@@ -35,14 +35,13 @@ impl Collector for PackageCollector {
         if let Some(path) = &self.fixture_path {
             let content = fs::read_to_string(path)
                 .with_context(|| format!("failed to read package fixture {}", path.display()))?;
-            return Ok(parse_dpkg_list(&content));
+            let mut items = parse_dpkg_list(&content);
+            items.push(host_item());
+            return Ok(items);
         }
 
         let output = Command::new("dpkg-query")
-            .args([
-                "-W",
-                "-f=${binary:Package}\\t${Version}\\t${Architecture}\\n",
-            ])
+            .args(["-W", "-f=${binary:Package}\t${Version}\t${Architecture}\n"])
             .output()
             .await
             .context("failed to execute dpkg-query")?;
@@ -52,8 +51,28 @@ impl Collector for PackageCollector {
                 String::from_utf8_lossy(&output.stderr).trim()
             );
         }
-        Ok(parse_dpkg_query(&String::from_utf8_lossy(&output.stdout)))
+        let mut items = parse_dpkg_query(&String::from_utf8_lossy(&output.stdout));
+        // Emit a single host-filesystem item so the scanner can run `dir:/`
+        // against the host and pick up all installed package vulnerabilities.
+        items.push(host_item());
+        Ok(items)
     }
+}
+
+/// A synthetic inventory item representing the host filesystem. This causes
+/// `scan_targets_from_inventory` to emit a `dir:/` scan target for Grype,
+/// which discovers vulnerabilities in all installed packages on the host.
+pub fn host_item() -> InventoryItem {
+    let mut item = InventoryItem::new(
+        "host:localhost",
+        "host",
+        InventorySource::Host,
+        InventoryKind::Host,
+    );
+    item.status = RuntimeStatus::Running;
+    item.exposure = Exposure::Unknown;
+    item.collected_at = Utc::now();
+    item
 }
 
 pub fn parse_dpkg_list(input: &str) -> Vec<InventoryItem> {
@@ -118,5 +137,17 @@ mod tests {
         assert!(!packages
             .iter()
             .any(|package| package.package_name.as_deref() == Some("oldpkg")));
+    }
+
+    #[test]
+    fn collect_includes_host_item() {
+        let mut items = parse_dpkg_list(FIXTURE);
+        items.push(host_item());
+
+        let host = items.iter().find(|i| i.kind == InventoryKind::Host);
+        assert!(host.is_some(), "host item should be present");
+        let host = host.unwrap();
+        assert_eq!(host.id, "host:localhost");
+        assert_eq!(host.source, InventorySource::Host);
     }
 }

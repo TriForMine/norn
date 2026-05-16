@@ -49,6 +49,10 @@ export interface VulnerabilitySummary {
   fixed_version?: string | null;
 }
 
+export interface ScanStatus {
+  running: boolean;
+}
+
 export interface ScanRecord {
   id: string;
   host: string;

@@ -1,13 +1,14 @@
 import {
   Bug,
   LayoutDashboard,
+  Loader2,
   RefreshCcw,
   Rows3,
   Settings,
   Shield,
   Timer,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { IgnoreRules } from "./components/IgnoreRules";
 import { NotificationSettings } from "./components/NotificationSettings";
 import { ScanHistory } from "./components/ScanHistory";
@@ -44,6 +45,8 @@ const emptySummary: Summary = {
   last_scan_time: null,
 };
 
+const SCAN_POLL_INTERVAL_MS = 2000;
+
 export function App() {
   const [tab, setTab] = useState<Tab>("dashboard");
   const [summary, setSummary] = useState<Summary>(emptySummary);
@@ -54,6 +57,9 @@ export function App() {
   const [scans, setScans] = useState<ScanRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState<string | null>(null);
+  const [scanRunning, setScanRunning] = useState(false);
+  const [scanElapsed, setScanElapsed] = useState(0);
+  const scanStartRef = useRef<number | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -77,18 +83,66 @@ export function App() {
     }
   }, []);
 
+  // Poll scan status. When a scan transitions from running → done, refresh data.
+  useEffect(() => {
+    let wasRunning = false;
+
+    const poll = async () => {
+      try {
+        const { running } = await api.scanStatus();
+        setScanRunning(running);
+
+        if (running && !wasRunning) {
+          // scan just started (externally, e.g. scheduler)
+          scanStartRef.current = Date.now();
+        }
+        if (!running && wasRunning) {
+          // scan just finished — refresh data
+          setScanElapsed(0);
+          scanStartRef.current = null;
+          await refresh();
+        }
+        wasRunning = running;
+      } catch {
+        // status endpoint unreachable, ignore
+      }
+    };
+
+    void poll();
+    const id = setInterval(() => void poll(), SCAN_POLL_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [refresh]);
+
+  // Tick the elapsed counter every second while a scan is running.
+  useEffect(() => {
+    if (!scanRunning) return;
+    const id = setInterval(() => {
+      if (scanStartRef.current !== null) {
+        setScanElapsed(Math.floor((Date.now() - scanStartRef.current) / 1000));
+      }
+    }, 1000);
+    return () => clearInterval(id);
+  }, [scanRunning]);
+
   useEffect(() => {
     void refresh();
   }, [refresh]);
 
   async function runScan() {
-    setStatus("Scan running");
+    setScanRunning(true);
+    scanStartRef.current = Date.now();
+    setScanElapsed(0);
+    setStatus(null);
     try {
       await api.runScan();
       await refresh();
       setStatus("Scan complete");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Scan failed");
+    } finally {
+      setScanRunning(false);
+      scanStartRef.current = null;
+      setScanElapsed(0);
     }
   }
 
@@ -126,16 +180,41 @@ export function App() {
               Refresh
             </button>
             <button
-              className="focus-ring inline-flex items-center gap-2 rounded bg-brand px-3 py-2 text-sm font-semibold text-white shadow-surface dark:text-slate-950"
+              className="focus-ring inline-flex items-center gap-2 rounded bg-brand px-3 py-2 text-sm font-semibold text-white shadow-surface dark:text-slate-950 disabled:cursor-not-allowed disabled:opacity-50"
               onClick={() => void runScan()}
+              disabled={scanRunning}
               type="button"
             >
-              <Shield className="h-4 w-4" aria-hidden="true" />
-              Scan
+              {scanRunning ? (
+                <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+              ) : (
+                <Shield className="h-4 w-4" aria-hidden="true" />
+              )}
+              {scanRunning ? "Scanning…" : "Scan"}
             </button>
           </div>
         </div>
       </header>
+
+      {scanRunning ? (
+        <div className="border-b border-amber-200 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/40">
+          <div className="mx-auto flex max-w-7xl items-center gap-3 px-4 py-2 lg:px-6">
+            <Loader2
+              className="h-4 w-4 shrink-0 animate-spin text-amber-600 dark:text-amber-400"
+              aria-hidden="true"
+            />
+            <p className="text-sm font-medium text-amber-800 dark:text-amber-300">
+              Scan in progress
+              {scanElapsed > 0
+                ? ` — ${Math.floor(scanElapsed / 60)}m ${scanElapsed % 60}s elapsed`
+                : ""}
+            </p>
+            <p className="text-sm text-amber-600 dark:text-amber-500">
+              Dashboard will refresh automatically when complete.
+            </p>
+          </div>
+        </div>
+      ) : null}
 
       <div className="mx-auto grid max-w-7xl gap-5 px-4 py-5 lg:grid-cols-[220px_minmax(0,1fr)] lg:px-6">
         <nav className="flex gap-2 overflow-x-auto lg:block lg:space-y-1">

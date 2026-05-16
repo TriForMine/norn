@@ -14,7 +14,7 @@ pub trait Collector: Send + Sync {
 
 - Docker: running containers, image references, labels, published ports, privileged mode, and Docker socket mounts.
 - systemd: active services from `systemctl list-units`.
-- packages: installed dpkg packages.
+- packages: installed dpkg packages via `dpkg-query`. Also emits a synthetic host-filesystem item that causes Grype to run `dir:/` against the host, scanning all installed packages for CVEs.
 - ports: listening TCP/UDP sockets from `ss`.
 
 ## Adding Collectors

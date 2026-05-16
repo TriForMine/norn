@@ -60,6 +60,7 @@ pub fn router(state: ApiState, static_dir: impl AsRef<Path>) -> Router {
         .route("/services", get(services))
         .route("/vulnerabilities", get(vulnerabilities))
         .route("/scans", get(scans))
+        .route("/scans/status", get(scan_status))
         .route("/scans/run", post(run_scan))
         .route("/ignore", post(ignore))
         .route("/notifications/test", post(test_notification))
@@ -116,6 +117,11 @@ async fn vulnerabilities(
 
 async fn scans(State(state): State<ApiState>) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!(state.db.list_scans()?)))
+}
+
+async fn scan_status(State(state): State<ApiState>) -> Json<serde_json::Value> {
+    let running = state.scan_lock.try_lock().is_err();
+    Json(json!({ "running": running }))
 }
 
 async fn run_scan(State(state): State<ApiState>) -> ApiResult<Json<serde_json::Value>> {
