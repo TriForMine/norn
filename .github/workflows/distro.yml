@@ -58,10 +58,10 @@ jobs:
         if: matrix.family == 'debian'
         run: |
           apt-get update -qq
-          # curl and ca-certificates are already present in base images;
-          # reqwest uses rustls so libcurl is not needed.
+          # ca-certificates is required by git for HTTPS checkout.
+          # curl is not needed — reqwest uses rustls (bundled TLS).
           apt-get install -y --no-install-recommends \
-            build-essential pkg-config libssl-dev git
+            ca-certificates build-essential pkg-config libssl-dev git
 
       - name: Install system dependencies (RPM)
         if: matrix.family == 'rpm'
