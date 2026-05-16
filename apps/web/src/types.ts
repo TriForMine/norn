@@ -49,6 +49,23 @@ export interface VulnerabilitySummary {
   fixed_version?: string | null;
 }
 
+export interface RemediationItem {
+  service: string;
+  highest_risk: RiskLevel;
+  exposure: Exposure;
+  vulnerability_count: number;
+  fixable_count: number;
+  critical_count: number;
+  high_count: number;
+  medium_count: number;
+  low_count: number;
+  informational_count: number;
+  top_vulnerabilities: string[];
+  first_seen: string;
+  last_seen: string;
+  recommended_action: string;
+}
+
 export interface ScanStatus {
   running: boolean;
   phase: string;

@@ -174,6 +174,7 @@ pub fn router(state: ApiState, static_dir: impl AsRef<Path>) -> Router {
         .route("/summary", get(summary))
         .route("/inventory", get(inventory))
         .route("/services", get(services))
+        .route("/remediation", get(remediation))
         .route("/vulnerabilities", get(vulnerabilities))
         .route("/scans", get(scans))
         .route("/scans/status", get(scan_status))
@@ -213,6 +214,10 @@ async fn inventory(State(state): State<ApiState>) -> ApiResult<Json<serde_json::
 
 async fn services(State(state): State<ApiState>) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!(state.db.service_summaries()?)))
+}
+
+async fn remediation(State(state): State<ApiState>) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(state.db.remediation_items()?)))
 }
 
 #[derive(Debug, Deserialize)]

@@ -26,9 +26,10 @@ use norn_collector_packages::PackageCollector;
 use norn_collector_ports::PortCollector;
 use norn_collector_systemd::SystemdCollector;
 use norn_core::{
-    Exposure, IgnoredFinding, InventoryItem, NornConfig, NotificationEvent, Notifier, RiskLevel,
-    ScanOutcome, ScanRecord, ScanRunner, ScanTarget, ScannerError, ServiceSummary, Summary,
-    VulnerabilityFinding, VulnerabilityScanner, VulnerabilitySummary, DEFAULT_CONFIG_PATH,
+    Exposure, IgnoredFinding, InventoryItem, NornConfig, NotificationEvent, Notifier,
+    RemediationItem, RiskLevel, ScanOutcome, ScanRecord, ScanRunner, ScanTarget, ScannerError,
+    ServiceSummary, Summary, VulnerabilityFinding, VulnerabilityScanner, VulnerabilitySummary,
+    DEFAULT_CONFIG_PATH,
 };
 use norn_db::Database;
 use norn_inventory::{
@@ -124,7 +125,6 @@ enum ReportFormat {
 }
 
 const TUI_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
-const TUI_VULNERABILITY_LIMIT: usize = 200;
 const TUI_SCAN_HISTORY_LIMIT: usize = 3;
 
 #[derive(Debug, Default)]
@@ -139,6 +139,7 @@ struct ReportDocument {
     scan: Option<ScanRecord>,
     summary: Summary,
     services: Vec<ServiceSummary>,
+    remediation: Vec<RemediationItem>,
     vulnerabilities: Vec<VulnerabilitySummary>,
 }
 
@@ -969,7 +970,7 @@ fn scan_record_with_errors(
 struct TuiSnapshot {
     summary: Summary,
     services: Vec<ServiceSummary>,
-    vulnerabilities: Vec<VulnerabilitySummary>,
+    remediation: Vec<RemediationItem>,
     scans: Vec<ScanRecord>,
 }
 
@@ -1113,12 +1114,12 @@ fn load_tui_snapshot(db: &Database) -> Result<TuiSnapshot> {
         )
     });
 
-    let vulnerabilities = db.vulnerability_summaries_limited(TUI_VULNERABILITY_LIMIT)?;
+    let remediation = db.remediation_items()?;
 
     Ok(TuiSnapshot {
         summary: db.summary()?,
         services,
-        vulnerabilities,
+        remediation,
         scans: db.list_scans()?,
     })
 }
@@ -1141,7 +1142,7 @@ fn draw_tui(frame: &mut Frame<'_>, snapshot: &TuiSnapshot, status: &str) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(rows[1]);
     frame.render_widget(services_widget(&snapshot.services), main[0]);
-    frame.render_widget(vulnerabilities_widget(&snapshot.vulnerabilities), main[1]);
+    frame.render_widget(remediation_widget(&snapshot.remediation), main[1]);
 
     frame.render_widget(scans_widget(&snapshot.scans), rows[2]);
     frame.render_widget(footer_widget(status), rows[3]);
@@ -1242,29 +1243,38 @@ fn services_widget(services: &[ServiceSummary]) -> List<'_> {
     )
 }
 
-fn vulnerabilities_widget(vulnerabilities: &[VulnerabilitySummary]) -> List<'_> {
-    let items = vulnerabilities
+fn remediation_widget(items: &[RemediationItem]) -> List<'_> {
+    let rows = items
         .iter()
         .take(12)
-        .map(|vulnerability| {
+        .map(|item| {
+            let top = if item.top_vulnerabilities.is_empty() {
+                "no CVE".to_string()
+            } else {
+                item.top_vulnerabilities
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
             ListItem::new(Line::from(vec![
-                Span::styled(
-                    &vulnerability.vulnerability_id,
-                    risk_style(vulnerability.runtime_risk),
-                ),
+                Span::styled(&item.service, risk_style(item.highest_risk)),
                 Span::raw(format!(
-                    " | {} | {} | fix {:?}",
-                    vulnerability.affected_service,
-                    vulnerability.exposed,
-                    vulnerability.fix_available
+                    " | {} | {} vuln | {} fix | {} | {}",
+                    item.exposure,
+                    item.vulnerability_count,
+                    item.fixable_count,
+                    item.highest_risk.as_str(),
+                    top
                 )),
             ]))
         })
         .collect::<Vec<_>>();
 
-    empty_list_fallback(items, "No runtime risks from a completed scan").block(
+    empty_list_fallback(rows, "No remediation items from a completed scan").block(
         Block::default()
-            .title("Vulnerabilities")
+            .title("Remediation Queue")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray)),
     )
@@ -1447,6 +1457,7 @@ fn build_report(db: &Database, scan_selector: &str) -> Result<ReportDocument> {
             scan: None,
             summary: Summary::default(),
             services: Vec::new(),
+            remediation: Vec::new(),
             vulnerabilities: Vec::new(),
         });
     };
@@ -1454,6 +1465,7 @@ fn build_report(db: &Database, scan_selector: &str) -> Result<ReportDocument> {
         generated_at: Utc::now(),
         summary: db.summary_for_scan(&scan.id)?,
         services: db.service_summaries_for_scan(&scan.id)?,
+        remediation: db.remediation_items_for_scan(&scan.id)?,
         vulnerabilities: db.vulnerability_summaries_for_scan(&scan.id)?,
         scan: Some(scan),
     })
@@ -1509,6 +1521,24 @@ fn render_markdown_report(report: &ReportDocument) -> String {
         "- Informational runtime risks: {}\n\n",
         report.summary.informational_risks
     ));
+    output.push_str("## Remediation queue\n\n");
+    if report.remediation.is_empty() {
+        output.push_str("- None\n");
+    } else {
+        for item in report.remediation.iter().take(20) {
+            output.push_str(&format!(
+                "- **{}**: {} risk, {} exposure, {} findings ({} fixable). Top: {}. {}\n",
+                item.service,
+                item.highest_risk.as_str(),
+                item.exposure,
+                item.vulnerability_count,
+                item.fixable_count,
+                item.top_vulnerabilities.join(", "),
+                item.recommended_action
+            ));
+        }
+    }
+    output.push('\n');
     output.push_str("## Urgent\n\n");
     push_report_group(
         &mut output,
@@ -1709,6 +1739,7 @@ mod tests {
             }),
             summary: Summary::default(),
             services: Vec::new(),
+            remediation: Vec::new(),
             vulnerabilities: vec![VulnerabilitySummary {
                 vulnerability_id: "GHSA-test".to_string(),
                 severity: Severity::Medium,

@@ -1,4 +1,5 @@
 import type {
+  RemediationItem,
   ScanRecord,
   ScanStatus,
   ServiceSummary,
@@ -17,6 +18,7 @@ async function getJson<T>(path: string): Promise<T> {
 export const api = {
   summary: () => getJson<Summary>("/api/summary"),
   services: () => getJson<ServiceSummary[]>("/api/services"),
+  remediation: () => getJson<RemediationItem[]>("/api/remediation"),
   vulnerabilities: () =>
     getJson<VulnerabilitySummary[]>("/api/vulnerabilities?limit=500"),
   scans: () => getJson<ScanRecord[]>("/api/scans"),

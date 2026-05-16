@@ -6,11 +6,13 @@ import {
   Rows3,
   Settings,
   Shield,
+  ShieldAlert,
   Timer,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { IgnoreRules } from "./components/IgnoreRules";
 import { NotificationSettings } from "./components/NotificationSettings";
+import { RemediationQueue } from "./components/RemediationQueue";
 import { ScanHistory } from "./components/ScanHistory";
 import { ServicesTable } from "./components/ServicesTable";
 import { SummaryCards } from "./components/SummaryCards";
@@ -18,6 +20,7 @@ import { ThemeToggle } from "./components/ThemeToggle";
 import { VulnerabilitiesTable } from "./components/VulnerabilitiesTable";
 import { api } from "./lib/api";
 import type {
+  RemediationItem,
   ScanRecord,
   ScanStatus,
   ServiceSummary,
@@ -27,6 +30,7 @@ import type {
 
 type Tab =
   | "dashboard"
+  | "remediation"
   | "services"
   | "vulnerabilities"
   | "scans"
@@ -52,6 +56,7 @@ export function App() {
   const [tab, setTab] = useState<Tab>("dashboard");
   const [summary, setSummary] = useState<Summary>(emptySummary);
   const [services, setServices] = useState<ServiceSummary[]>([]);
+  const [remediation, setRemediation] = useState<RemediationItem[]>([]);
   const [vulnerabilities, setVulnerabilities] = useState<
     VulnerabilitySummary[]
   >([]);
@@ -66,15 +71,23 @@ export function App() {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const [nextSummary, nextServices, nextVulnerabilities, nextScans] =
+      const [
+        nextSummary,
+        nextServices,
+        nextRemediation,
+        nextVulnerabilities,
+        nextScans
+      ] =
         await Promise.all([
           api.summary(),
           api.services(),
+          api.remediation(),
           api.vulnerabilities(),
           api.scans(),
         ]);
       setSummary(nextSummary);
       setServices(nextServices);
+      setRemediation(nextRemediation);
       setVulnerabilities(nextVulnerabilities);
       setScans(nextScans);
       setStatus(null);
@@ -173,6 +186,7 @@ export function App() {
   const nav = useMemo(
     () => [
       { id: "dashboard" as const, label: "Dashboard", icon: LayoutDashboard },
+      { id: "remediation" as const, label: "Remediation", icon: ShieldAlert },
       { id: "services" as const, label: "Services", icon: Rows3 },
       { id: "vulnerabilities" as const, label: "Vulnerabilities", icon: Bug },
       { id: "scans" as const, label: "Scans", icon: Timer },
@@ -294,13 +308,14 @@ export function App() {
               <SummaryCards summary={summary} />
               <section>
                 <h2 className="mb-3 text-base font-semibold text-ink">
-                  Top runtime risks
+                  Remediation queue
                 </h2>
-                <VulnerabilitiesTable
-                  vulnerabilities={vulnerabilities.slice(0, 8)}
-                />
+                <RemediationQueue items={remediation.slice(0, 8)} />
               </section>
             </>
+          ) : null}
+          {tab === "remediation" ? (
+            <RemediationQueue items={remediation} />
           ) : null}
           {tab === "services" ? <ServicesTable services={services} /> : null}
           {tab === "vulnerabilities" ? (

@@ -11,7 +11,7 @@ Norn is licensed under Apache-2.0.
 
 ## Dashboard Preview
 
-The MVP includes a React dashboard with summary cards, services, vulnerabilities, scan history, notification testing, and ignore controls. Build it with `cd apps/web && bun install && bun run build`, then run `norn serve`.
+The MVP includes a React dashboard with summary cards, remediation queue, services, vulnerabilities, scan history, notification testing, and ignore controls. Build it with `cd apps/web && bun install && bun run build`, then run `norn serve`.
 
 ## Features
 
@@ -22,6 +22,7 @@ The MVP includes a React dashboard with summary cards, services, vulnerabilities
 - Linux host collectors for systemd services, dpkg packages, and listening ports.
 - Grype scanner adapter with subprocess execution, timeout handling, missing-binary errors, and fixture parsing.
 - Runtime risk engine that considers severity, public exposure, container privilege, Docker socket mounts, and fix availability.
+- Remediation queue groups noisy vulnerability findings by affected service and ranks what to fix first.
 - SQLite scan history with versioned migration SQL.
 - Axum REST API and Vite/React dashboard with persisted light/dark theme support.
 - Polished terminal output with scan progress, readable tables, and an interactive TUI.
@@ -97,6 +98,7 @@ norn ignore CVE-2026-0001 --service nginx --days 30 --config /etc/norn/config.to
 - `GET /api/summary`
 - `GET /api/inventory`
 - `GET /api/services`
+- `GET /api/remediation`
 - `GET /api/vulnerabilities` accepts optional `?limit=500` style caps for dashboard-sized responses
 - `GET /api/scans`
 - `GET /api/scans/status` returns `running` plus current scan phase, target counters, and active target

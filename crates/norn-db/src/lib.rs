@@ -8,9 +8,9 @@ use std::{
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use norn_core::{
-    Exposure, IgnoredFinding, InventoryItem, InventoryKind, InventorySource, NotificationEvent,
-    RiskEvaluation, RiskLevel, RuntimeStatus, ScanRecord, ScannerError, ServiceSummary, Summary,
-    VulnerabilityFinding, VulnerabilitySummary,
+    Exposure, FixAvailability, IgnoredFinding, InventoryItem, InventoryKind, InventorySource,
+    NotificationEvent, RemediationItem, RiskEvaluation, RiskLevel, RuntimeStatus, ScanRecord,
+    ScannerError, ServiceSummary, Summary, VulnerabilityFinding, VulnerabilitySummary,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
@@ -508,6 +508,18 @@ impl Database {
         self.vulnerability_summaries_for_scan_with_limit(scan_id, None)
     }
 
+    pub fn remediation_items(&self) -> Result<Vec<RemediationItem>> {
+        let Some(scan_id) = self.latest_scan_id()? else {
+            return Ok(Vec::new());
+        };
+        self.remediation_items_for_scan(&scan_id)
+    }
+
+    pub fn remediation_items_for_scan(&self, scan_id: &str) -> Result<Vec<RemediationItem>> {
+        let vulnerabilities = self.vulnerability_summaries_for_scan(scan_id)?;
+        Ok(build_remediation_items(vulnerabilities))
+    }
+
     fn vulnerability_summaries_for_scan_with_limit(
         &self,
         scan_id: &str,
@@ -747,6 +759,135 @@ fn vulnerability_summary_from_row(
     })
 }
 
+fn build_remediation_items(vulnerabilities: Vec<VulnerabilitySummary>) -> Vec<RemediationItem> {
+    let mut groups = std::collections::BTreeMap::<String, Vec<VulnerabilitySummary>>::new();
+    for vulnerability in vulnerabilities {
+        groups
+            .entry(vulnerability.affected_service.clone())
+            .or_default()
+            .push(vulnerability);
+    }
+
+    let mut items = groups
+        .into_iter()
+        .filter_map(|(service, mut vulnerabilities)| {
+            vulnerabilities.sort_by_key(|vulnerability| {
+                (
+                    std::cmp::Reverse(vulnerability.runtime_risk.score()),
+                    std::cmp::Reverse(fixability_score(vulnerability.fix_available)),
+                    vulnerability.vulnerability_id.clone(),
+                )
+            });
+            let first = vulnerabilities.first()?;
+            let highest_risk = vulnerabilities
+                .iter()
+                .map(|vulnerability| vulnerability.runtime_risk)
+                .max_by_key(|risk| risk.score())
+                .unwrap_or(RiskLevel::Informational);
+            let exposure = vulnerabilities
+                .iter()
+                .map(|vulnerability| vulnerability.exposed)
+                .max_by_key(|exposure| exposure_priority(*exposure))
+                .unwrap_or(Exposure::Unknown);
+            let fixable_count = vulnerabilities
+                .iter()
+                .filter(|vulnerability| vulnerability.fix_available == FixAvailability::Available)
+                .count();
+            let first_seen = vulnerabilities
+                .iter()
+                .map(|vulnerability| vulnerability.first_seen)
+                .min()
+                .unwrap_or(first.first_seen);
+            let last_seen = vulnerabilities
+                .iter()
+                .map(|vulnerability| vulnerability.last_seen)
+                .max()
+                .unwrap_or(first.last_seen);
+            let top_vulnerabilities = vulnerabilities
+                .iter()
+                .take(5)
+                .map(|vulnerability| vulnerability.vulnerability_id.clone())
+                .collect::<Vec<_>>();
+
+            Some(RemediationItem {
+                service,
+                highest_risk,
+                exposure,
+                vulnerability_count: vulnerabilities.len(),
+                fixable_count,
+                critical_count: vulnerabilities
+                    .iter()
+                    .filter(|vulnerability| vulnerability.runtime_risk == RiskLevel::Critical)
+                    .count(),
+                high_count: vulnerabilities
+                    .iter()
+                    .filter(|vulnerability| vulnerability.runtime_risk == RiskLevel::High)
+                    .count(),
+                medium_count: vulnerabilities
+                    .iter()
+                    .filter(|vulnerability| vulnerability.runtime_risk == RiskLevel::Medium)
+                    .count(),
+                low_count: vulnerabilities
+                    .iter()
+                    .filter(|vulnerability| vulnerability.runtime_risk == RiskLevel::Low)
+                    .count(),
+                informational_count: vulnerabilities
+                    .iter()
+                    .filter(|vulnerability| vulnerability.runtime_risk == RiskLevel::Informational)
+                    .count(),
+                recommended_action: remediation_action(highest_risk, exposure, fixable_count),
+                top_vulnerabilities,
+                first_seen,
+                last_seen,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    items.sort_by_key(|item| {
+        (
+            std::cmp::Reverse(item.highest_risk.score()),
+            std::cmp::Reverse(exposure_priority(item.exposure)),
+            std::cmp::Reverse(item.fixable_count),
+            std::cmp::Reverse(item.vulnerability_count),
+            item.service.clone(),
+        )
+    });
+    items
+}
+
+fn exposure_priority(exposure: Exposure) -> u8 {
+    match exposure {
+        Exposure::Public => 4,
+        Exposure::Unknown => 3,
+        Exposure::Internal => 2,
+        Exposure::Localhost => 1,
+    }
+}
+
+fn fixability_score(fix: FixAvailability) -> u8 {
+    match fix {
+        FixAvailability::Available => 3,
+        FixAvailability::Unknown => 2,
+        FixAvailability::NotAvailable => 1,
+    }
+}
+
+fn remediation_action(risk: RiskLevel, exposure: Exposure, fixable_count: usize) -> String {
+    if risk.at_least(RiskLevel::High) && exposure == Exposure::Public && fixable_count > 0 {
+        "Patch or update this public-facing service first.".to_string()
+    } else if risk.at_least(RiskLevel::High) && exposure == Exposure::Unknown {
+        "Confirm exposure, then patch or restrict access.".to_string()
+    } else if risk.at_least(RiskLevel::High) && fixable_count > 0 {
+        "Patch or update this service after public-facing risks.".to_string()
+    } else if risk.at_least(RiskLevel::High) {
+        "Review compensating controls and watch for fixed versions.".to_string()
+    } else if fixable_count > 0 {
+        "Batch with the next regular maintenance window.".to_string()
+    } else {
+        "Monitor and reassess when fixes become available.".to_string()
+    }
+}
+
 fn collect_rows<T>(
     rows: rusqlite::MappedRows<'_, impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>>,
 ) -> Result<Vec<T>> {
@@ -814,6 +955,50 @@ mod tests {
         assert_eq!(summary.public_services, 1);
         assert_eq!(summary.critical_risks, 1);
         assert_eq!(db.list_scans().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn remediation_items_group_and_prioritize_service_findings() {
+        let now = Utc::now();
+        let items = build_remediation_items(vec![
+            vulnerability_summary(
+                "CVE-public-fix",
+                "public-web",
+                RiskLevel::High,
+                Exposure::Public,
+                FixAvailability::Available,
+                now,
+            ),
+            vulnerability_summary(
+                "CVE-public-no-fix",
+                "public-web",
+                RiskLevel::Medium,
+                Exposure::Public,
+                FixAvailability::NotAvailable,
+                now,
+            ),
+            vulnerability_summary(
+                "CVE-internal-critical",
+                "worker",
+                RiskLevel::Critical,
+                Exposure::Internal,
+                FixAvailability::Available,
+                now,
+            ),
+        ]);
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].service, "worker");
+        assert_eq!(items[0].highest_risk, RiskLevel::Critical);
+        assert_eq!(items[0].fixable_count, 1);
+        assert_eq!(items[1].service, "public-web");
+        assert_eq!(items[1].vulnerability_count, 2);
+        assert_eq!(items[1].fixable_count, 1);
+        assert_eq!(items[1].high_count, 1);
+        assert_eq!(items[1].medium_count, 1);
+        assert!(items[1]
+            .recommended_action
+            .contains("public-facing service"));
     }
 
     #[test]
@@ -976,6 +1161,29 @@ mod tests {
             exposure: Exposure::Public,
             reason: "critical public".to_string(),
             recommended_action: Some("Patch".to_string()),
+        }
+    }
+
+    fn vulnerability_summary(
+        vulnerability_id: &str,
+        service: &str,
+        risk: RiskLevel,
+        exposure: Exposure,
+        fix_available: FixAvailability,
+        seen_at: DateTime<Utc>,
+    ) -> VulnerabilitySummary {
+        VulnerabilitySummary {
+            vulnerability_id: vulnerability_id.to_string(),
+            severity: Severity::High,
+            runtime_risk: risk,
+            affected_service: service.to_string(),
+            exposed: exposure,
+            fix_available,
+            first_seen: seen_at,
+            last_seen: seen_at,
+            package_name: Some("package".to_string()),
+            installed_version: Some("1.0.0".to_string()),
+            fixed_version: Some("1.0.1".to_string()),
         }
     }
 }

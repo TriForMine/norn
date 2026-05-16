@@ -384,6 +384,24 @@ pub struct VulnerabilitySummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RemediationItem {
+    pub service: String,
+    pub highest_risk: RiskLevel,
+    pub exposure: Exposure,
+    pub vulnerability_count: usize,
+    pub fixable_count: usize,
+    pub critical_count: usize,
+    pub high_count: usize,
+    pub medium_count: usize,
+    pub low_count: usize,
+    pub informational_count: usize,
+    pub top_vulnerabilities: Vec<String>,
+    pub first_seen: DateTime<Utc>,
+    pub last_seen: DateTime<Utc>,
+    pub recommended_action: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScanOutcome {
     pub scan: ScanRecord,
     pub summary: Summary,
