@@ -35,6 +35,8 @@ impl Database {
         }
         let conn = Connection::open(&path)
             .with_context(|| format!("failed to open SQLite database {}", path.display()))?;
+        configure_connection(&conn)
+            .with_context(|| format!("failed to configure SQLite connection {}", path.display()))?;
         let db = Self {
             conn: Arc::new(Mutex::new(conn)),
         };
@@ -43,8 +45,12 @@ impl Database {
     }
 
     pub fn open_memory() -> Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        // WAL is not meaningful for in-memory DBs, but busy_timeout still is.
+        conn.execute_batch("PRAGMA busy_timeout = 5000;")
+            .context("failed to configure in-memory SQLite connection")?;
         let db = Self {
-            conn: Arc::new(Mutex::new(Connection::open_in_memory()?)),
+            conn: Arc::new(Mutex::new(conn)),
         };
         db.migrate()?;
         Ok(db)
@@ -609,6 +615,27 @@ impl Database {
             )
             .context("failed to load scan")
     }
+}
+
+/// Apply connection-level PRAGMAs that must be set on every open.
+///
+/// - `journal_mode=WAL`: readers never block writers and writers never block
+///   readers, which matters in `serve` mode where the API polls the DB while
+///   long scan inserts are in flight.
+/// - `synchronous=NORMAL`: safe with WAL (a crash can only lose the last
+///   un-checkpointed frames, not corrupt the database), and meaningfully
+///   faster than the default FULL mode.
+/// - `busy_timeout=5000`: instead of returning SQLITE_BUSY immediately when
+///   another connection holds a lock, wait up to 5 s before giving up.
+fn configure_connection(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        PRAGMA journal_mode = WAL;
+        PRAGMA synchronous  = NORMAL;
+        PRAGMA busy_timeout = 5000;
+        ",
+    )
+    .context("failed to apply SQLite connection PRAGMAs")
 }
 
 fn sqlite_path_from_url(url: &str) -> Result<PathBuf> {
