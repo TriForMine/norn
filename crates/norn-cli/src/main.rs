@@ -1441,6 +1441,12 @@ fn render_sarif_report(report: &ReportDocument) -> serde_json::Value {
                 "shortDescription": {
                     "text": format!("{} vulnerability", finding.severity.as_str())
                 },
+                "fullDescription": {
+                    "text": "Runtime vulnerability detected by Norn."
+                },
+                "help": {
+                    "text": "Review the affected runtime service, network exposure, package version, and available fixed version before deciding whether to patch, reconfigure, or ignore the finding."
+                },
                 "properties": {
                     "severity": finding.severity,
                     "runtime_risk": finding.runtime_risk,
@@ -1572,5 +1578,64 @@ fn push_report_group<'a>(
     }
     if !printed {
         output.push_str("- None\n");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use norn_core::{FixAvailability, Severity};
+
+    #[test]
+    fn sarif_report_contains_github_required_locations_and_rule_help() {
+        let now = Utc::now();
+        let report = ReportDocument {
+            generated_at: now,
+            scan: Some(ScanRecord {
+                id: "scan-1".to_string(),
+                host: "test-host".to_string(),
+                started_at: now,
+                completed_at: Some(now),
+                status: "completed".to_string(),
+                inventory_count: 1,
+                finding_count: 1,
+                scanner_errors: Vec::new(),
+            }),
+            summary: Summary::default(),
+            services: Vec::new(),
+            vulnerabilities: vec![VulnerabilitySummary {
+                vulnerability_id: "GHSA-test".to_string(),
+                severity: Severity::Medium,
+                runtime_risk: RiskLevel::High,
+                affected_service: "api".to_string(),
+                exposed: Exposure::Public,
+                fix_available: FixAvailability::Available,
+                first_seen: now,
+                last_seen: now,
+                package_name: Some("openssl".to_string()),
+                installed_version: Some("1.0.0".to_string()),
+                fixed_version: Some("1.0.1".to_string()),
+            }],
+        };
+
+        let sarif = render_sarif_report(&report);
+        let run = &sarif["runs"][0];
+        let result = &run["results"][0];
+        let rule = &run["tool"]["driver"]["rules"][0];
+
+        assert_eq!(sarif["version"], "2.1.0");
+        assert_eq!(rule["id"], "GHSA-test");
+        assert!(rule["help"]["text"]
+            .as_str()
+            .expect("rule help is text")
+            .contains("Review the affected runtime service"));
+        assert_eq!(result["ruleId"], "GHSA-test");
+        assert_eq!(result["level"], "error");
+        assert_eq!(
+            result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+            "examples/config.toml"
+        );
+        assert_eq!(result["properties"]["service"], "api");
+        assert_eq!(result["properties"]["fixed_version"], "1.0.1");
     }
 }
