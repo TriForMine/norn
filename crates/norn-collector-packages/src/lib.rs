@@ -65,7 +65,11 @@ impl Collector for PackageCollector {
 
         // Fall back to rpm (RHEL/Fedora/Rocky/Amazon Linux/etc.).
         match Command::new("rpm")
-            .args(["-qa", "--queryformat", "%{NAME}\t%{VERSION}-%{RELEASE}\n"])
+            .args([
+                "-qa",
+                "--queryformat",
+                "%{NAME}\t%{VERSION}-%{RELEASE}\t%{ARCH}\n",
+            ])
             .output()
             .await
         {
@@ -117,15 +121,15 @@ pub fn parse_dpkg_query(input: &str) -> Vec<InventoryItem> {
             if fields.len() < 2 {
                 return None;
             }
-            Some(package_item(fields[0], fields[1]))
+            Some(package_item(fields[0], fields[1], fields.get(2).copied()))
         })
         .collect()
 }
 
-/// Parse the output of `rpm -qa --queryformat '%{NAME}\t%{VERSION}-%{RELEASE}\n'`.
+/// Parse the output of `rpm -qa --queryformat '%{NAME}\t%{VERSION}-%{RELEASE}\t%{ARCH}\n'`.
 ///
-/// Each non-empty line is expected to be tab-separated `name\tversion` and is
-/// turned into an [`InventoryItem`] with [`InventoryKind::Package`].
+/// Each non-empty line is expected to be tab-separated `name\tversion\tarch`.
+/// Older fixtures without an arch field are still accepted.
 pub fn parse_rpm_query(input: &str) -> Vec<InventoryItem> {
     input
         .lines()
@@ -134,7 +138,7 @@ pub fn parse_rpm_query(input: &str) -> Vec<InventoryItem> {
             if fields.len() < 2 {
                 return None;
             }
-            Some(package_item(fields[0], fields[1]))
+            Some(package_item(fields[0], fields[1], fields.get(2).copied()))
         })
         .collect()
 }
@@ -148,12 +152,16 @@ fn parse_dpkg_status_line(line: &str) -> Option<InventoryItem> {
     if fields.len() < 3 {
         return None;
     }
-    Some(package_item(fields[1], fields[2]))
+    Some(package_item(fields[1], fields[2], fields.get(3).copied()))
 }
 
-fn package_item(name: &str, version: &str) -> InventoryItem {
+fn package_item(name: &str, version: &str, architecture: Option<&str>) -> InventoryItem {
+    let id = architecture
+        .filter(|value| !value.trim().is_empty())
+        .map(|architecture| format!("package:{name}:{architecture}"))
+        .unwrap_or_else(|| format!("package:{name}"));
     let mut item = InventoryItem::new(
-        format!("package:{name}"),
+        id,
         name,
         InventorySource::PackageManager,
         InventoryKind::Package,
@@ -185,6 +193,7 @@ mod tests {
         assert!(packages.iter().any(|package| {
             package.package_name.as_deref() == Some("openssl")
                 && package.package_version.as_deref() == Some("3.0.11-1~deb12u2")
+                && package.id == "package:openssl:amd64"
         }));
         assert!(!packages
             .iter()
@@ -211,18 +220,22 @@ mod tests {
         assert!(packages.iter().any(|p| {
             p.package_name.as_deref() == Some("openssl")
                 && p.package_version.as_deref() == Some("3.0.7-27.el9")
+                && p.id == "package:openssl:x86_64"
         }));
         assert!(packages.iter().any(|p| {
             p.package_name.as_deref() == Some("openssl-libs")
                 && p.package_version.as_deref() == Some("3.0.7-27.el9")
+                && p.id == "package:openssl-libs:x86_64"
         }));
         assert!(packages.iter().any(|p| {
             p.package_name.as_deref() == Some("bash")
                 && p.package_version.as_deref() == Some("5.1.8-6.el9")
+                && p.id == "package:bash:x86_64"
         }));
         assert!(packages.iter().any(|p| {
             p.package_name.as_deref() == Some("nginx")
                 && p.package_version.as_deref() == Some("1.20.1-14.el9")
+                && p.id == "package:nginx:x86_64"
         }));
         // Every item must be tagged as an installed package.
         assert!(packages

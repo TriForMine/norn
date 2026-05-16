@@ -22,6 +22,7 @@ pub trait Collector: Send + Sync {
 New collectors should:
 
 - Return stable IDs.
+- Include package architecture in package IDs when the package manager reports it.
 - Use typed fields for source, kind, status, exposure, and endpoints.
 - Avoid panics and return clear errors.
 - Include fixture parsers and tests that do not require the real host dependency.

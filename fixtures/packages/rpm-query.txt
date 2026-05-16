@@ -1,4 +1,4 @@
-bash	5.1.8-6.el9
-openssl	3.0.7-27.el9
-openssl-libs	3.0.7-27.el9
-nginx	1.20.1-14.el9
+bash	5.1.8-6.el9	x86_64
+openssl	3.0.7-27.el9	x86_64
+openssl-libs	3.0.7-27.el9	x86_64
+nginx	1.20.1-14.el9	x86_64
