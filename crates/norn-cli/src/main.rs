@@ -1482,6 +1482,20 @@ fn render_sarif_report(report: &ReportDocument) -> serde_json::Value {
                         finding.fix_available
                     )
                 },
+                "locations": [
+                    {
+                        "physicalLocation": {
+                            "artifactLocation": {
+                                "uri": "examples/config.toml",
+                                "uriBaseId": "%SRCROOT%",
+                            },
+                            "region": {
+                                "startLine": 1,
+                                "startColumn": 1,
+                            },
+                        },
+                    },
+                ],
                 "properties": {
                     "service": finding.affected_service,
                     "exposure": finding.exposed,
