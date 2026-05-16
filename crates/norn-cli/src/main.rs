@@ -20,7 +20,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
-use norn_api::{serve, ApiState, ScanLock, ScanProgressState};
+use norn_api::{serve, ApiState, ScanLock, ScanProgressState, ScanStatusSnapshot};
 use norn_collector_docker::DockerCollector;
 use norn_collector_packages::PackageCollector;
 use norn_collector_ports::PortCollector;
@@ -205,8 +205,15 @@ async fn main() -> Result<()> {
             serve(&config.server.bind, &config.server.static_dir, state).await?;
         }
         Commands::Tui => {
-            let runner = LocalScanRunner::new(config, db.clone(), host, notifier, None);
-            run_tui(db, runner).await?;
+            let scan_progress = ScanProgressState::default();
+            let runner = LocalScanRunner::new(
+                config,
+                db.clone(),
+                host,
+                notifier,
+                Some(scan_progress.clone()),
+            );
+            run_tui(db, runner, scan_progress).await?;
         }
         Commands::Inventory { output } => {
             let registry = build_collectors(&config);
@@ -311,12 +318,17 @@ impl LocalScanRunner {
     async fn run_scan_internal(&self, progress: ScanProgress) -> Result<ScanOutcome> {
         let scan = self.db.create_scan(&self.host)?;
         info!(scan_id = scan.id, host = self.host, "scan started");
+        let scan_id = scan.id.clone();
         if let Some(scan_progress) = &self.scan_progress {
             scan_progress.start(scan.id.clone(), self.host.clone());
         }
 
         let outcome = self.run_scan_steps(scan, progress).await;
         if outcome.is_err() {
+            let errors: Vec<ScannerError> = Vec::new();
+            if let Err(error) = self.db.finish_scan(&scan_id, "failed", 0, 0, &errors) {
+                warn!(error = %error, scan_id, "failed to mark failed scan");
+            }
             if let Some(scan_progress) = &self.scan_progress {
                 scan_progress.finish("Scan failed");
             }
@@ -948,17 +960,46 @@ struct TuiSnapshot {
     scans: Vec<ScanRecord>,
 }
 
-async fn run_tui(db: Database, runner: LocalScanRunner) -> Result<()> {
+async fn run_tui(
+    db: Database,
+    runner: LocalScanRunner,
+    scan_progress: ScanProgressState,
+) -> Result<()> {
     let (mut terminal, _guard) = enter_tui()?;
     let mut status = "q quit | r run scan | R refresh".to_string();
     let mut snapshot = load_tui_snapshot(&db)?;
     let mut last_refresh = Instant::now();
+    let mut scan_task: Option<tokio::task::JoinHandle<Result<ScanOutcome>>> = None;
 
     loop {
-        terminal.draw(|frame| draw_tui(frame, &snapshot, &status))?;
+        if scan_task
+            .as_ref()
+            .map(|task| task.is_finished())
+            .unwrap_or(false)
+        {
+            let finished_scan = scan_task.take().expect("scan task exists");
+            status = match finished_scan.await {
+                Ok(Ok(outcome)) => {
+                    snapshot = load_tui_snapshot(&db)?;
+                    last_refresh = Instant::now();
+                    format!(
+                        "Scan completed: {} inventory, {} findings, {} errors",
+                        outcome.scan.inventory_count,
+                        outcome.scan.finding_count,
+                        outcome.scan.scanner_errors.len()
+                    )
+                }
+                Ok(Err(error)) => format!("Scan failed: {error}"),
+                Err(error) => format!("Scan task failed: {error}"),
+            };
+        }
+
+        let progress = scan_progress.snapshot();
+        let status_line = tui_status_line(&status, &progress);
+        terminal.draw(|frame| draw_tui(frame, &snapshot, &status_line))?;
 
         if !event::poll(Duration::from_millis(250))? {
-            if last_refresh.elapsed() >= TUI_REFRESH_INTERVAL {
+            if progress.running || last_refresh.elapsed() >= TUI_REFRESH_INTERVAL {
                 snapshot = load_tui_snapshot(&db)?;
                 last_refresh = Instant::now();
             }
@@ -970,23 +1011,18 @@ async fn run_tui(db: Database, runner: LocalScanRunner) -> Result<()> {
         };
 
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => break,
+            KeyCode::Char('q') | KeyCode::Esc => {
+                cancel_tui_scan(&db, scan_task.take(), &scan_progress).await;
+                break;
+            }
             KeyCode::Char('r') => {
-                status = "Running scan...".to_string();
-                terminal.draw(|frame| draw_tui(frame, &snapshot, &status))?;
-                status = match runner.run_scan().await {
-                    Ok(outcome) => {
-                        snapshot = load_tui_snapshot(&db)?;
-                        last_refresh = Instant::now();
-                        format!(
-                            "Scan completed: {} inventory, {} findings, {} errors",
-                            outcome.scan.inventory_count,
-                            outcome.scan.finding_count,
-                            outcome.scan.scanner_errors.len()
-                        )
-                    }
-                    Err(error) => format!("Scan failed: {error}"),
-                };
+                if scan_task.is_some() || progress.running {
+                    status = "Scan already running".to_string();
+                } else {
+                    status = "Scan started".to_string();
+                    let runner = runner.clone();
+                    scan_task = Some(tokio::spawn(async move { runner.run_scan().await }));
+                }
             }
             KeyCode::Char('R') => {
                 snapshot = load_tui_snapshot(&db)?;
@@ -999,6 +1035,27 @@ async fn run_tui(db: Database, runner: LocalScanRunner) -> Result<()> {
 
     terminal.show_cursor()?;
     Ok(())
+}
+
+async fn cancel_tui_scan(
+    db: &Database,
+    scan_task: Option<tokio::task::JoinHandle<Result<ScanOutcome>>>,
+    scan_progress: &ScanProgressState,
+) {
+    let progress = scan_progress.snapshot();
+    if let Some(task) = scan_task {
+        task.abort();
+        let _ = task.await;
+    }
+    if progress.running {
+        if let Some(scan_id) = progress.scan_id {
+            let errors: Vec<ScannerError> = Vec::new();
+            if let Err(error) = db.finish_scan(&scan_id, "cancelled", 0, 0, &errors) {
+                warn!(error = %error, scan_id, "failed to mark cancelled TUI scan");
+            }
+        }
+        scan_progress.finish("Scan cancelled");
+    }
 }
 
 fn enter_tui() -> Result<(Terminal<CrosstermBackend<Stdout>>, TerminalGuard)> {
@@ -1075,6 +1132,36 @@ fn draw_tui(frame: &mut Frame<'_>, snapshot: &TuiSnapshot, status: &str) {
 
     frame.render_widget(scans_widget(&snapshot.scans), rows[2]);
     frame.render_widget(footer_widget(status), rows[3]);
+}
+
+fn tui_status_line(status: &str, progress: &ScanStatusSnapshot) -> String {
+    if !progress.running {
+        return status.to_string();
+    }
+
+    let target_progress = if progress.total_target_checks > 0 {
+        format!(
+            " {}/{}",
+            progress.completed_target_checks, progress.total_target_checks
+        )
+    } else {
+        String::new()
+    };
+    let current_target = progress
+        .current_target
+        .as_ref()
+        .map(|target| format!(" | {target}"))
+        .unwrap_or_default();
+    let message = progress
+        .message
+        .as_ref()
+        .map(|message| format!(" | {message}"))
+        .unwrap_or_default();
+
+    format!(
+        "{}{}{}{} | q quit | R refresh",
+        progress.phase_label, target_progress, current_target, message
+    )
 }
 
 fn overview_widget(summary: &Summary) -> Paragraph<'_> {
@@ -1637,5 +1724,38 @@ mod tests {
         );
         assert_eq!(result["properties"]["service"], "api");
         assert_eq!(result["properties"]["fixed_version"], "1.0.1");
+    }
+
+    #[test]
+    fn tui_status_line_shows_live_scan_progress() {
+        let progress = ScanStatusSnapshot {
+            running: true,
+            phase: "scanning_vulnerabilities".to_string(),
+            phase_label: "Scanning vulnerabilities".to_string(),
+            scan_id: Some("scan-1".to_string()),
+            host: Some("test-host".to_string()),
+            started_at: Some(Utc::now()),
+            completed_target_checks: 7,
+            total_target_checks: 12,
+            current_target: Some("api (grype)".to_string()),
+            parallelism: 4,
+            message: Some("Collecting advisories".to_string()),
+        };
+
+        let status = tui_status_line("idle", &progress);
+
+        assert!(status.contains("Scanning vulnerabilities 7/12"));
+        assert!(status.contains("api (grype)"));
+        assert!(status.contains("Collecting advisories"));
+    }
+
+    #[test]
+    fn tui_status_line_uses_idle_status_when_no_scan_is_running() {
+        let progress = ScanStatusSnapshot::default();
+
+        assert_eq!(
+            tui_status_line("q quit | r run scan | R refresh", &progress),
+            "q quit | r run scan | R refresh"
+        );
     }
 }
