@@ -120,6 +120,7 @@ enum OutputFormat {
 enum ReportFormat {
     Json,
     Markdown,
+    Sarif,
 }
 
 const TUI_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
@@ -1317,6 +1318,7 @@ fn write_report(
     let rendered = match format {
         ReportFormat::Json => serde_json::to_string_pretty(&report)?,
         ReportFormat::Markdown => render_markdown_report(&report),
+        ReportFormat::Sarif => serde_json::to_string_pretty(&render_sarif_report(&report))?,
     };
     if let Some(path) = output {
         fs::write(path, rendered)
@@ -1426,6 +1428,115 @@ fn render_markdown_report(report: &ReportDocument) -> String {
             .filter(|finding| !finding.runtime_risk.at_least(RiskLevel::High)),
     );
     output
+}
+
+fn render_sarif_report(report: &ReportDocument) -> serde_json::Value {
+    let rules = report
+        .vulnerabilities
+        .iter()
+        .map(|finding| {
+            serde_json::json!({
+                "id": finding.vulnerability_id,
+                "name": finding.vulnerability_id,
+                "shortDescription": {
+                    "text": format!("{} vulnerability", finding.severity.as_str())
+                },
+                "properties": {
+                    "severity": finding.severity,
+                    "runtime_risk": finding.runtime_risk,
+                    "fix_available": finding.fix_available,
+                }
+            })
+        })
+        .fold(
+            std::collections::BTreeMap::<String, serde_json::Value>::new(),
+            |mut rules, rule| {
+                if let Some(id) = rule.get("id").and_then(|id| id.as_str()) {
+                    rules.entry(id.to_string()).or_insert(rule);
+                }
+                rules
+            },
+        )
+        .into_values()
+        .collect::<Vec<_>>();
+    let results = report
+        .vulnerabilities
+        .iter()
+        .map(|finding| {
+            let package = finding.package_name.as_deref().map(|package| {
+                match finding.installed_version.as_deref() {
+                    Some(version) => format!("{package} {version}"),
+                    None => package.to_string(),
+                }
+            });
+            serde_json::json!({
+                "ruleId": finding.vulnerability_id,
+                "level": sarif_level(finding.runtime_risk),
+                "message": {
+                    "text": format!(
+                        "{} on {} is {} runtime risk ({}, fix {:?})",
+                        finding.vulnerability_id,
+                        finding.affected_service,
+                        finding.runtime_risk.as_str(),
+                        finding.exposed,
+                        finding.fix_available
+                    )
+                },
+                "properties": {
+                    "service": finding.affected_service,
+                    "exposure": finding.exposed,
+                    "runtime_risk": finding.runtime_risk,
+                    "severity": finding.severity,
+                    "fix_available": finding.fix_available,
+                    "package": package,
+                    "fixed_version": finding.fixed_version,
+                    "first_seen": finding.first_seen,
+                    "last_seen": finding.last_seen,
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::json!({
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "name": "Norn",
+                        "informationUri": "https://github.com/TriForMine/norn",
+                        "rules": rules,
+                    }
+                },
+                "invocations": [
+                    {
+                        "executionSuccessful": report
+                            .scan
+                            .as_ref()
+                            .map(|scan| scan.scanner_errors.is_empty())
+                            .unwrap_or(true),
+                        "startTimeUtc": report.scan.as_ref().map(|scan| scan.started_at),
+                        "endTimeUtc": report.scan.as_ref().and_then(|scan| scan.completed_at),
+                    }
+                ],
+                "properties": {
+                    "host": report.scan.as_ref().map(|scan| scan.host.clone()),
+                    "scan_id": report.scan.as_ref().map(|scan| scan.id.clone()),
+                    "generated_at": report.generated_at,
+                },
+                "results": results,
+            }
+        ]
+    })
+}
+
+fn sarif_level(risk: RiskLevel) -> &'static str {
+    match risk {
+        RiskLevel::Critical | RiskLevel::High => "error",
+        RiskLevel::Medium => "warning",
+        RiskLevel::Low | RiskLevel::Informational => "note",
+    }
 }
 
 fn push_report_group<'a>(

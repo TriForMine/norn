@@ -86,6 +86,7 @@ norn tui --config /etc/norn/config.toml
 norn serve --config /etc/norn/config.toml
 norn inventory --config /etc/norn/config.toml --output table
 norn report --config /etc/norn/config.toml --format markdown --scan latest --output report.md
+norn report --config /etc/norn/config.toml --format sarif --output norn.sarif
 norn notify test --config /etc/norn/config.toml
 norn ignore CVE-2026-0001 --service nginx --days 30 --config /etc/norn/config.toml
 ```
