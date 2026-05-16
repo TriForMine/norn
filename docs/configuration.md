@@ -48,9 +48,9 @@ max_notifications_per_scan = 50
 
 ## Scan History Retention
 
-`database.retention_days` controls how many days of completed scan history Norn retains. After each scan, Norn automatically deletes scans whose `started_at` timestamp is older than `retention_days` days. Only scans with a non-`running` status are eligible for deletion, so in-progress scans are never removed.
+`database.retention_days` controls how many days of completed scan history Norn retains. After each scan, Norn automatically deletes scans whose `started_at` timestamp is older than `retention_days` days. Only scans with a non-`running` status are eligible for deletion, so in-progress scans are never removed. Notification dedupe events older than the same cutoff are also deleted, so old alerts can be emitted again once they fall outside the retention window.
 
-Set `retention_days = 0` to retain all scan history forever (pruning is disabled).
+Set `retention_days = 0` to retain all scan history and notification dedupe events forever (pruning is disabled).
 
 The default is `90` days. Override with the `NORN_RETENTION_DAYS` environment variable.
 

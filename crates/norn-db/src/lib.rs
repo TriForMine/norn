@@ -145,11 +145,17 @@ impl Database {
             return Ok(0);
         }
         let cutoff = Utc::now() - chrono::Duration::days(retention_days as i64);
-        let deleted = self.conn.lock().expect("database mutex poisoned").execute(
+        let cutoff = cutoff.to_rfc3339();
+        let conn = self.conn.lock().expect("database mutex poisoned");
+        let deleted_scans = conn.execute(
             "DELETE FROM scans WHERE started_at < ?1 AND status != 'running'",
-            params![cutoff.to_rfc3339()],
+            params![&cutoff],
         )?;
-        Ok(deleted)
+        let deleted_notifications = conn.execute(
+            "DELETE FROM notification_events WHERE created_at < ?1",
+            params![&cutoff],
+        )?;
+        Ok(deleted_scans + deleted_notifications)
     }
 
     pub fn insert_inventory(&self, scan_id: &str, items: &[InventoryItem]) -> Result<()> {
@@ -870,5 +876,87 @@ mod tests {
         let deleted = db.prune_old_scans(90).unwrap();
         assert_eq!(deleted, 0);
         assert_eq!(db.list_scans().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn prune_old_scans_removes_old_notification_events() {
+        let db = Database::open_memory().unwrap();
+        let old_scan = db.create_scan("test-host").unwrap();
+        let recent_scan = db.create_scan("test-host").unwrap();
+        let event = notification_event("nginx", Some("CVE-2026-0001"));
+
+        db.insert_notification(Some(&old_scan.id), "risk", &event)
+            .unwrap();
+        db.insert_notification(Some(&recent_scan.id), "risk", &event)
+            .unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE notification_events SET created_at = ?1 WHERE scan_id = ?2",
+                params![
+                    (Utc::now() - chrono::Duration::days(200)).to_rfc3339(),
+                    old_scan.id,
+                ],
+            )
+            .unwrap();
+
+        let deleted = db.prune_old_scans(90).unwrap();
+
+        assert_eq!(deleted, 1);
+        assert!(db
+            .has_prior_notification_event("new-scan", "risk", Some("CVE-2026-0001"), "nginx",)
+            .unwrap());
+        let count: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM notification_events", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn prune_old_scans_retention_zero_keeps_notification_events() {
+        let db = Database::open_memory().unwrap();
+        let scan = db.create_scan("test-host").unwrap();
+        let event = notification_event("nginx", Some("CVE-2026-0001"));
+        db.insert_notification(Some(&scan.id), "risk", &event)
+            .unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE notification_events SET created_at = ?1 WHERE scan_id = ?2",
+                params![
+                    (Utc::now() - chrono::Duration::days(500)).to_rfc3339(),
+                    scan.id,
+                ],
+            )
+            .unwrap();
+
+        let deleted = db.prune_old_scans(0).unwrap();
+
+        assert_eq!(deleted, 0);
+        assert!(db
+            .has_prior_notification_event("new-scan", "risk", Some("CVE-2026-0001"), "nginx",)
+            .unwrap());
+    }
+
+    fn notification_event(service: &str, vulnerability_id: Option<&str>) -> NotificationEvent {
+        NotificationEvent {
+            project: "Norn".to_string(),
+            host: "test-host".to_string(),
+            service: service.to_string(),
+            artifact: Some("nginx:latest".to_string()),
+            vulnerability_id: vulnerability_id.map(str::to_string),
+            severity: Some(Severity::Critical),
+            runtime_risk: RiskLevel::Critical,
+            exposure: Exposure::Public,
+            reason: "critical public".to_string(),
+            recommended_action: Some("Patch".to_string()),
+        }
     }
 }
