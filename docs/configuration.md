@@ -28,6 +28,10 @@ enabled = true
 [collectors.ports]
 enabled = true
 
+[scanner]
+parallelism = 4
+scan_host_filesystem = false
+
 [scanner.grype]
 enabled = true
 binary = "grype"
@@ -49,6 +53,12 @@ max_notifications_per_scan = 50
 Set `retention_days = 0` to retain all scan history forever (pruning is disabled).
 
 The default is `90` days. Override with the `NORN_RETENTION_DAYS` environment variable.
+
+## Host Filesystem Scanning
+
+The package collector always records installed packages as inventory, but Norn does not run Grype against the whole host filesystem by default. Full host scans can produce very large result sets on long-lived servers and can overwhelm notifications.
+
+Set `scanner.scan_host_filesystem = true` to add a `dir:/` vulnerability scan target for the host. Override with `NORN_SCANNER_SCAN_HOST_FILESYSTEM=true`.
 
 ## Summary Labels
 
@@ -86,6 +96,8 @@ Collectors and the Grype adapter support `fixture_path` fields. This is used by 
 - `NORN_SERVER_BIND`
 - `NORN_DATABASE_URL`
 - `NORN_SCAN_INTERVAL`
+- `NORN_SCANNER_PARALLELISM`
+- `NORN_SCANNER_SCAN_HOST_FILESYSTEM`
 - `NORN_GRYPE_BINARY`
 - `NORN_DISCORD_ENABLED`
 - `NORN_DISCORD_WEBHOOK_URL`

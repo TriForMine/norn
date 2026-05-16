@@ -43,13 +43,27 @@ impl CollectorRegistry {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScanTargetOptions {
+    pub scan_host_filesystem: bool,
+}
+
 pub fn scan_targets_from_inventory(items: &[InventoryItem]) -> Vec<ScanTarget> {
+    scan_targets_from_inventory_with_options(items, ScanTargetOptions::default())
+}
+
+pub fn scan_targets_from_inventory_with_options(
+    items: &[InventoryItem],
+    options: ScanTargetOptions,
+) -> Vec<ScanTarget> {
     items
         .iter()
         .filter_map(|item| match item.kind {
             InventoryKind::Container if item.is_running() => container_scan_reference(item)
                 .map(|reference| ScanTarget::from_inventory(item, reference)),
-            InventoryKind::Host => Some(ScanTarget::from_inventory(item, "dir:/")),
+            InventoryKind::Host if options.scan_host_filesystem => {
+                Some(ScanTarget::from_inventory(item, "dir:/"))
+            }
             _ => None,
         })
         .collect()
@@ -176,6 +190,29 @@ mod tests {
         let targets = scan_targets_from_inventory(&[item]);
 
         assert_eq!(targets[0].reference, "docker:sha256:abc123");
+    }
+
+    #[test]
+    fn host_filesystem_scan_target_is_opt_in() {
+        let mut item = InventoryItem::new(
+            "host:localhost",
+            "host",
+            InventorySource::Host,
+            InventoryKind::Host,
+        );
+        item.status = RuntimeStatus::Running;
+
+        let default_targets = scan_targets_from_inventory(&[item.clone()]);
+        let host_targets = scan_targets_from_inventory_with_options(
+            &[item],
+            ScanTargetOptions {
+                scan_host_filesystem: true,
+            },
+        );
+
+        assert!(default_targets.is_empty());
+        assert_eq!(host_targets.len(), 1);
+        assert_eq!(host_targets[0].reference, "dir:/");
     }
 
     #[test]

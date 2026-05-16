@@ -58,6 +58,9 @@ impl NornConfig {
                 self.scanner.parallelism = parallelism.max(1);
             }
         }
+        if let Ok(value) = env::var("NORN_SCANNER_SCAN_HOST_FILESYSTEM") {
+            self.scanner.scan_host_filesystem = parse_bool(&value);
+        }
         if let Ok(value) = env::var("NORN_DISCORD_WEBHOOK_URL") {
             self.notifications.discord.webhook_url = value;
         }
@@ -188,6 +191,7 @@ impl Default for BasicCollectorConfig {
 #[serde(default)]
 pub struct ScannerConfig {
     pub parallelism: usize,
+    pub scan_host_filesystem: bool,
     pub grype: GrypeConfig,
 }
 
@@ -201,6 +205,7 @@ impl Default for ScannerConfig {
     fn default() -> Self {
         Self {
             parallelism: 4,
+            scan_host_filesystem: false,
             grype: GrypeConfig::default(),
         }
     }
@@ -303,6 +308,7 @@ mod tests {
     fn loads_config_and_applies_env_override() {
         env::set_var("NORN_SERVER_BIND", "127.0.0.1:9000");
         env::set_var("NORN_SCANNER_PARALLELISM", "12");
+        env::set_var("NORN_SCANNER_SCAN_HOST_FILESYSTEM", "true");
         env::set_var("NORN_RISK_NOTIFY_MINIMUM", "Critical");
         env::set_var("NORN_RISK_MAX_NOTIFICATIONS_PER_SCAN", "7");
         env::set_var("NORN_RETENTION_DAYS", "30");
@@ -318,6 +324,7 @@ mod tests {
         .unwrap();
         env::remove_var("NORN_SERVER_BIND");
         env::remove_var("NORN_SCANNER_PARALLELISM");
+        env::remove_var("NORN_SCANNER_SCAN_HOST_FILESYSTEM");
         env::remove_var("NORN_RISK_NOTIFY_MINIMUM");
         env::remove_var("NORN_RISK_MAX_NOTIFICATIONS_PER_SCAN");
         env::remove_var("NORN_RETENTION_DAYS");
@@ -325,6 +332,7 @@ mod tests {
         assert_eq!(cfg.server.bind, "127.0.0.1:9000");
         assert_eq!(cfg.database.url, "sqlite://./norn.db");
         assert_eq!(cfg.scanner.parallelism(), 12);
+        assert!(cfg.scanner.scan_host_filesystem);
         assert_eq!(cfg.risk.notify_minimum, RiskLevel::Critical);
         assert_eq!(cfg.risk.max_notifications_per_scan, 7);
         assert_eq!(cfg.database.retention_days, 30);

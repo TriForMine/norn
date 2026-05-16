@@ -29,6 +29,7 @@ fixture_path = "fixtures/ports/ss-listening.txt"
 
 [scanner]
 parallelism = 4
+scan_host_filesystem = false
 
 [scanner.grype]
 enabled = true

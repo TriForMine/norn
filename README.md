@@ -113,6 +113,7 @@ static_dir = "/opt/norn/web"
 
 [database]
 url = "sqlite:///var/lib/norn/norn.db"
+retention_days = 90
 
 [scan]
 interval = "6h"
@@ -120,6 +121,7 @@ run_on_start = true
 
 [scanner]
 parallelism = 4
+scan_host_filesystem = false
 
 [collectors.docker]
 enabled = true
@@ -139,7 +141,7 @@ notify_minimum = "High"
 max_notifications_per_scan = 50
 ```
 
-Environment overrides include `NORN_SERVER_BIND`, `NORN_DATABASE_URL`, `NORN_SCAN_INTERVAL`, `NORN_SCANNER_PARALLELISM`, `NORN_GRYPE_BINARY`, `NORN_DISCORD_ENABLED`, `NORN_DISCORD_WEBHOOK_URL`, `NORN_RISK_NOTIFY_MINIMUM`, and `NORN_RISK_MAX_NOTIFICATIONS_PER_SCAN`.
+Environment overrides include `NORN_SERVER_BIND`, `NORN_DATABASE_URL`, `NORN_SCAN_INTERVAL`, `NORN_SCANNER_PARALLELISM`, `NORN_SCANNER_SCAN_HOST_FILESYSTEM`, `NORN_GRYPE_BINARY`, `NORN_DISCORD_ENABLED`, `NORN_DISCORD_WEBHOOK_URL`, `NORN_RISK_NOTIFY_MINIMUM`, `NORN_RISK_MAX_NOTIFICATIONS_PER_SCAN`, and `NORN_RETENTION_DAYS`.
 
 ## Docker Compose
 

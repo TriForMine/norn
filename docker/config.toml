@@ -25,6 +25,7 @@ enabled = true
 
 [scanner]
 parallelism = 4
+scan_host_filesystem = false
 
 [scanner.grype]
 enabled = true

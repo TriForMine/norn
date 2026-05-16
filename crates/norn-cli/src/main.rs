@@ -31,8 +31,8 @@ use norn_core::{
 };
 use norn_db::Database;
 use norn_inventory::{
-    expand_findings_to_targets, scan_targets_from_inventory, unique_scan_target_groups,
-    CollectorRegistry,
+    expand_findings_to_targets, scan_targets_from_inventory_with_options,
+    unique_scan_target_groups, CollectorRegistry, ScanTargetOptions,
 };
 use norn_notify::DiscordNotifier;
 use norn_risk::evaluate_finding;
@@ -286,7 +286,12 @@ impl LocalScanRunner {
         inventory_progress
             .finish_with_message(format!("Collected {} inventory items", inventory.len()));
 
-        let targets = scan_targets_from_inventory(&inventory);
+        let targets = scan_targets_from_inventory_with_options(
+            &inventory,
+            ScanTargetOptions {
+                scan_host_filesystem: self.config.scanner.scan_host_filesystem,
+            },
+        );
         let scanners = build_scanners(&self.config);
         let (findings, scanner_errors) = scan_targets_with_progress(
             &scanners,
