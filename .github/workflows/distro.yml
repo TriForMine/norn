@@ -1,0 +1,114 @@
+name: Distro
+
+# Verify the binary builds and the package collector works correctly on a
+# representative set of Linux distributions. Container jobs give us the real
+# distro userspace (glibc version, package manager binaries) on Ubuntu runners.
+#
+# These jobs intentionally do NOT duplicate format/clippy/unit-test checks
+# from ci.yml. They focus on:
+#   1. The binary compiling successfully against each distro's glibc.
+#   2. The package collector actually executing dpkg-query / rpm on real packages.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  distro:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ── Debian / Ubuntu (dpkg) ──────────────────────────────────────
+          - name: Ubuntu 24.04 (Noble)
+            image: ubuntu:24.04
+            family: debian
+
+          - name: Ubuntu 22.04 (Jammy)
+            image: ubuntu:22.04
+            family: debian
+
+          - name: Debian 12 (Bookworm)
+            image: debian:12
+            family: debian
+
+          # ── RPM-based ───────────────────────────────────────────────────
+          - name: Fedora 41
+            image: fedora:41
+            family: rpm
+
+          - name: Rocky Linux 9
+            image: rockylinux:9
+            family: rpm
+
+          - name: Amazon Linux 2023
+            image: amazonlinux:2023
+            family: rpm
+
+    steps:
+      - name: Install system dependencies (Debian/Ubuntu)
+        if: matrix.family == 'debian'
+        run: |
+          apt-get update -qq
+          apt-get install -y --no-install-recommends \
+            curl ca-certificates build-essential pkg-config \
+            libssl-dev git
+
+      - name: Install system dependencies (RPM)
+        if: matrix.family == 'rpm'
+        run: |
+          # dnf is available on all three RPM images
+          dnf install -y \
+            curl ca-certificates gcc pkg-config \
+            openssl-devel git findutils
+
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: distro-${{ matrix.name }}
+
+      - name: Build (release)
+        run: cargo build --release --locked -p norn-cli
+
+      - name: Unit tests
+        run: cargo test --workspace --locked
+
+      # ── Live package collector smoke tests ─────────────────────────────
+      # These run the real binary against the actual package manager to confirm
+      # the collector works end-to-end on each distro. We just check that the
+      # binary exits cleanly and prints at least one package name to stdout.
+
+      - name: Smoke test — dpkg-query (Debian/Ubuntu)
+        if: matrix.family == 'debian'
+        run: |
+          ./target/release/norn inventory --output json | \
+            python3 -c "
+          import json, sys
+          items = json.load(sys.stdin)
+          pkgs = [i for i in items if i.get('kind') == 'package']
+          print(f'Found {len(pkgs)} packages')
+          assert len(pkgs) > 0, 'Expected at least one package from dpkg-query'
+          print('OK:', pkgs[0]['name'])
+          "
+
+      - name: Smoke test — rpm (RPM-based)
+        if: matrix.family == 'rpm'
+        run: |
+          ./target/release/norn inventory --output json | \
+            python3 -c "
+          import json, sys
+          items = json.load(sys.stdin)
+          pkgs = [i for i in items if i.get('kind') == 'package']
+          print(f'Found {len(pkgs)} packages')
+          assert len(pkgs) > 0, 'Expected at least one package from rpm'
+          print('OK:', pkgs[0]['name'])
+          "
