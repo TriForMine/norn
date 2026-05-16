@@ -135,6 +135,7 @@ async fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "norn=info,tower_http=info".into()),
         )
+        .with_writer(std::io::stderr)
         .init();
 
     let cli = Cli::parse();

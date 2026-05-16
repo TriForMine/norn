@@ -60,8 +60,9 @@ jobs:
           apt-get update -qq
           # ca-certificates is required by git for HTTPS checkout.
           # curl is not needed — reqwest uses rustls (bundled TLS).
+          # jq is used by the smoke test to parse inventory JSON.
           apt-get install -y --no-install-recommends \
-            ca-certificates build-essential pkg-config libssl-dev git
+            ca-certificates build-essential pkg-config libssl-dev git jq
 
       - name: Install system dependencies (RPM)
         if: matrix.family == 'rpm'
@@ -69,9 +70,10 @@ jobs:
           # curl-minimal is pre-installed and conflicts with the full curl package;
           # we don't need curl because reqwest uses rustls (bundled TLS).
           # ca-certificates is already present in all three images.
+          # jq is used by the smoke test to parse inventory JSON.
           dnf install -y \
             gcc pkg-config \
-            openssl-devel git findutils
+            openssl-devel git findutils jq
 
       - uses: actions/checkout@v4
 
@@ -96,25 +98,15 @@ jobs:
       - name: Smoke test — dpkg-query (Debian/Ubuntu)
         if: matrix.family == 'debian'
         run: |
-          ./target/release/norn inventory --output json | \
-            python3 -c "
-          import json, sys
-          items = json.load(sys.stdin)
-          pkgs = [i for i in items if i.get('kind') == 'package']
-          print(f'Found {len(pkgs)} packages')
-          assert len(pkgs) > 0, 'Expected at least one package from dpkg-query'
-          print('OK:', pkgs[0]['name'])
-          "
+          # RUST_LOG=off silences tracing output on stderr.
+          # Logs go to stderr (fixed in the binary), so stdout is clean JSON.
+          COUNT=$(RUST_LOG=off ./target/release/norn inventory --output json | jq '[.[] | select(.kind == "package")] | length')
+          echo "Found ${COUNT} packages from dpkg-query"
+          [ "${COUNT}" -gt 0 ] || { echo "ERROR: expected at least one package"; exit 1; }
 
       - name: Smoke test — rpm (RPM-based)
         if: matrix.family == 'rpm'
         run: |
-          ./target/release/norn inventory --output json | \
-            python3 -c "
-          import json, sys
-          items = json.load(sys.stdin)
-          pkgs = [i for i in items if i.get('kind') == 'package']
-          print(f'Found {len(pkgs)} packages')
-          assert len(pkgs) > 0, 'Expected at least one package from rpm'
-          print('OK:', pkgs[0]['name'])
-          "
+          COUNT=$(RUST_LOG=off ./target/release/norn inventory --output json | jq '[.[] | select(.kind == "package")] | length')
+          echo "Found ${COUNT} packages from rpm"
+          [ "${COUNT}" -gt 0 ] || { echo "ERROR: expected at least one package"; exit 1; }
