@@ -117,7 +117,8 @@ impl Database {
         scanner_errors: &[ScannerError],
     ) -> Result<()> {
         let errors_json = serde_json::to_string(scanner_errors)?;
-        self.conn.lock().expect("database mutex poisoned").execute(
+        let conn = self.conn.lock().expect("database mutex poisoned");
+        conn.execute(
             "UPDATE scans
              SET completed_at = ?2, status = ?3, inventory_count = ?4, finding_count = ?5,
                  scanner_errors_json = ?6
@@ -131,6 +132,11 @@ impl Database {
                 errors_json
             ],
         )?;
+        // Checkpoint the WAL so it doesn't grow unboundedly between scans.
+        // TRUNCATE resets the WAL file to zero bytes after a successful checkpoint.
+        // We ignore errors here: a failed checkpoint is not fatal, and WAL mode
+        // will continue to function correctly even without explicit checkpoints.
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
         Ok(())
     }
 
@@ -309,23 +315,6 @@ impl Database {
             .context("failed to collect notification dedupe keys")
     }
 
-    pub fn has_prior_risk(
-        &self,
-        scan_id: &str,
-        vulnerability_id: &str,
-        service: &str,
-    ) -> Result<bool> {
-        let conn = self.conn.lock().expect("database mutex poisoned");
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*)
-             FROM risk_evaluations
-             WHERE scan_id != ?1 AND vulnerability_id = ?2 AND service_name = ?3",
-            params![scan_id, vulnerability_id, service],
-            |row| row.get(0),
-        )?;
-        Ok(count > 0)
-    }
-
     pub fn latest_inventory(&self) -> Result<Vec<InventoryItem>> {
         let Some(scan_id) = self.latest_scan_id()? else {
             return Ok(Vec::new());
@@ -343,42 +332,6 @@ impl Database {
         json_rows
             .into_iter()
             .map(|json| serde_json::from_str(&json).context("failed to parse inventory JSON"))
-            .collect()
-    }
-
-    pub fn latest_risks(&self) -> Result<Vec<RiskEvaluation>> {
-        let Some(scan_id) = self.latest_scan_id()? else {
-            return Ok(Vec::new());
-        };
-        self.risks_for_scan(&scan_id)
-    }
-
-    pub fn risks_for_scan(&self, scan_id: &str) -> Result<Vec<RiskEvaluation>> {
-        let conn = self.conn.lock().expect("database mutex poisoned");
-        let mut stmt = conn.prepare(
-            "SELECT data_json FROM risk_evaluations WHERE scan_id = ?1 ORDER BY risk, service_name",
-        )?;
-        let rows = stmt.query_map(params![scan_id], |row| row.get::<_, String>(0))?;
-        let json_rows = collect_rows(rows)?;
-        json_rows
-            .into_iter()
-            .map(|json| serde_json::from_str(&json).context("failed to parse risk JSON"))
-            .collect()
-    }
-
-    pub fn latest_findings(&self) -> Result<Vec<VulnerabilityFinding>> {
-        let Some(scan_id) = self.latest_scan_id()? else {
-            return Ok(Vec::new());
-        };
-        let conn = self.conn.lock().expect("database mutex poisoned");
-        let mut stmt = conn.prepare(
-            "SELECT data_json FROM vulnerability_findings WHERE scan_id = ?1 ORDER BY severity, vulnerability_id",
-        )?;
-        let rows = stmt.query_map(params![scan_id], |row| row.get::<_, String>(0))?;
-        let json_rows = collect_rows(rows)?;
-        json_rows
-            .into_iter()
-            .map(|json| serde_json::from_str(&json).context("failed to parse finding JSON"))
             .collect()
     }
 

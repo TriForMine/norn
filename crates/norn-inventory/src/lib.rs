@@ -1,6 +1,5 @@
 use norn_core::{
     Collector, InventoryItem, InventoryKind, ScanTarget, ScannerError, VulnerabilityFinding,
-    VulnerabilityScanner,
 };
 use tracing::{debug, warn};
 
@@ -115,61 +114,6 @@ fn finding_for_target(finding: &VulnerabilityFinding, target: &ScanTarget) -> Vu
     finding.target_id = target.id.clone();
     finding.inventory_item_id = target.inventory_item_id.clone();
     finding
-}
-
-pub async fn scan_targets(
-    scanners: &[Box<dyn VulnerabilityScanner>],
-    targets: &[ScanTarget],
-) -> (Vec<VulnerabilityFinding>, Vec<ScannerError>) {
-    let mut findings = Vec::new();
-    let mut errors = Vec::new();
-    let groups = unique_scan_target_groups(targets);
-    let total_checks = targets.len().saturating_mul(scanners.len());
-    let unique_checks = groups.len().saturating_mul(scanners.len());
-    debug!(
-        target_checks = total_checks,
-        unique_checks,
-        duplicate_checks = total_checks.saturating_sub(unique_checks),
-        "deduplicated vulnerability scan targets"
-    );
-
-    for group in groups {
-        let target = &group.representative;
-        for scanner in scanners {
-            debug!(
-                scanner = scanner.name(),
-                target = target.reference,
-                "running vulnerability scanner"
-            );
-            match scanner.scan(target.clone()).await {
-                Ok(target_findings) => {
-                    findings.extend(expand_findings_to_targets(&target_findings, &group.targets));
-                }
-                Err(error) => {
-                    warn!(
-                        scanner = scanner.name(),
-                        target = target.reference,
-                        error = %error,
-                        "scanner failed for target"
-                    );
-                    errors.push(ScannerError {
-                        scanner: scanner.name().to_string(),
-                        target: target.reference.clone(),
-                        message: error.to_string(),
-                    });
-                }
-            }
-        }
-    }
-
-    (findings, errors)
-}
-
-pub fn scanner_vec<S>(scanner: S) -> Vec<Box<dyn VulnerabilityScanner>>
-where
-    S: VulnerabilityScanner + 'static,
-{
-    vec![Box::new(scanner)]
 }
 
 #[cfg(test)]
