@@ -11,16 +11,40 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+
       - uses: Swatinem/rust-cache@v2
+
       - name: Format
         run: cargo fmt --all -- --check
+
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+
       - name: Tests
         run: cargo test --workspace
+
+  msrv:
+    name: Minimum supported Rust version (1.78)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.78"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+
+      - name: Check MSRV
+        # --locked ensures we test against the exact locked dependency tree,
+        # not whatever newer versions resolve on an older toolchain.
+        run: cargo check --workspace --locked
 
   frontend:
     name: Web
@@ -30,10 +54,29 @@ jobs:
         working-directory: apps/web
     steps:
       - uses: actions/checkout@v4
+
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.2.20
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.bun/install/cache
+            apps/web/node_modules
+          key: bun-${{ runner.os }}-${{ hashFiles('apps/web/bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+
       - run: bun install --frozen-lockfile
       - run: bun run lint
       - run: bun run test
       - run: bun run build
+
+      - name: Upload dashboard artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: apps/web/dist
+          retention-days: 7

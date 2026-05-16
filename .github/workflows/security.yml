@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
   schedule:
+    # Every Monday at 04:21 UTC
     - cron: "21 4 * * 1"
 
 jobs:
@@ -13,14 +14,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
+
       - uses: Swatinem/rust-cache@v2
+
+      # cargo-deny and cargo-audit are cached via rust-cache because they are
+      # installed into the Cargo binary directory, which is part of the cache
+      # key. Installing from source without --locked would re-compile on every
+      # run; --locked pins to the exact version in each tool's own Cargo.lock.
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked
-      - name: cargo deny
-        run: cargo deny check
+
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
+
+      - name: cargo deny check
+        run: cargo deny check
+
       - name: cargo audit
         run: cargo audit
 
