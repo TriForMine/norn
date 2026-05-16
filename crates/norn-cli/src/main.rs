@@ -19,7 +19,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
-use norn_api::{serve, ApiState};
+use norn_api::{serve, ApiState, ScanLock};
 use norn_collector_docker::DockerCollector;
 use norn_collector_packages::PackageCollector;
 use norn_collector_ports::PortCollector;
@@ -168,11 +168,14 @@ async fn main() -> Result<()> {
                     Err(error) => warn!(error = %error, "startup scan failed"),
                 }
             }
-            spawn_scheduler(runner.clone(), config.scan.interval_duration()?);
-
             let mut state = ApiState::new(db);
-            state.runner = Some(runner);
+            state.runner = Some(runner.clone());
             state.notifier = notifier;
+            spawn_scheduler(
+                runner,
+                config.scan.interval_duration()?,
+                state.scan_lock.clone(),
+            );
             serve(&config.server.bind, &config.server.static_dir, state).await?;
         }
         Commands::Tui => {
@@ -794,14 +797,24 @@ fn build_notifier(config: &NornConfig) -> Option<Arc<dyn Notifier>> {
     }
 }
 
-fn spawn_scheduler(runner: Arc<LocalScanRunner>, interval: Duration) {
+fn spawn_scheduler(runner: Arc<LocalScanRunner>, interval: Duration, scan_lock: ScanLock) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
+        // consume the first immediate tick so the scheduler doesn't fire right
+        // after the startup scan already ran
+        ticker.tick().await;
         loop {
             ticker.tick().await;
-            ticker.tick().await;
-            if let Err(error) = runner.run_scan().await {
-                error!(error = %error, "scheduled scan failed");
+            match scan_lock.clone().try_lock_owned() {
+                Ok(_permit) => {
+                    if let Err(error) = runner.run_scan().await {
+                        error!(error = %error, "scheduled scan failed");
+                    }
+                    // _permit dropped here, after run_scan completes
+                }
+                Err(_) => {
+                    info!("scheduled scan skipped: a scan is already in progress");
+                }
             }
         }
     });

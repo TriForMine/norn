@@ -1,5 +1,7 @@
 use std::{net::SocketAddr, path::Path, sync::Arc};
 
+pub type ScanLock = Arc<tokio::sync::Mutex<()>>;
+
 use anyhow::{Context, Result};
 use axum::{
     extract::{Query, State},
@@ -22,6 +24,7 @@ pub struct ApiState {
     pub db: Database,
     pub runner: Option<Arc<dyn ScanRunner>>,
     pub notifier: Option<Arc<dyn Notifier>>,
+    pub scan_lock: ScanLock,
 }
 
 impl ApiState {
@@ -30,6 +33,7 @@ impl ApiState {
             db,
             runner: None,
             notifier: None,
+            scan_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 }
@@ -118,6 +122,9 @@ async fn run_scan(State(state): State<ApiState>) -> ApiResult<Json<serde_json::V
     let runner = state
         .runner
         .ok_or_else(|| ApiError::bad_request("scan runner is not configured"))?;
+    let _permit = Arc::clone(&state.scan_lock)
+        .try_lock_owned()
+        .map_err(|_| ApiError::conflict("a scan is already in progress"))?;
     let outcome = runner.run_scan().await?;
     Ok(Json(json!(outcome)))
 }
@@ -214,6 +221,13 @@ impl ApiError {
     fn bad_request(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
+            message: message.into(),
+        }
+    }
+
+    fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
             message: message.into(),
         }
     }
