@@ -125,6 +125,7 @@ enum ReportFormat {
 
 const TUI_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const TUI_VULNERABILITY_LIMIT: usize = 200;
+const TUI_SCAN_HISTORY_LIMIT: usize = 3;
 
 #[derive(Debug, Default)]
 struct NotificationBatch {
@@ -154,15 +155,8 @@ fn parse_positive_usize(value: &str) -> std::result::Result<usize, String> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "norn=info,tower_http=info".into()),
-        )
-        .with_writer(std::io::stderr)
-        .init();
-
     let cli = Cli::parse();
+    init_tracing(matches!(cli.command, Commands::Tui));
     let mut config = NornConfig::load(Some(&cli.config))
         .with_context(|| format!("failed to load config {}", cli.config.display()))?;
     let db = Database::open_url(&config.database.url)?;
@@ -273,6 +267,25 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn init_tracing(tui_mode: bool) {
+    let env_filter = || {
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "norn=info,tower_http=info".into())
+    };
+
+    if tui_mode {
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter())
+            .with_writer(std::io::sink)
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter())
+            .with_writer(std::io::stderr)
+            .init();
+    }
 }
 
 #[derive(Clone)]
@@ -1258,22 +1271,8 @@ fn vulnerabilities_widget(vulnerabilities: &[VulnerabilitySummary]) -> List<'_> 
 }
 
 fn scans_widget(scans: &[ScanRecord]) -> TuiTable<'_> {
-    let rows = scans.iter().take(4).map(|scan| {
-        Row::new(vec![
-            short_id(&scan.id),
-            scan.status.clone(),
-            scan.inventory_count.to_string(),
-            scan.finding_count.to_string(),
-            scan.scanner_errors.len().to_string(),
-            scan.completed_at
-                .or(Some(scan.started_at))
-                .map(format_tui_time)
-                .unwrap_or_else(|| "unknown".to_string()),
-        ])
-    });
-
     TuiTable::new(
-        rows,
+        scan_history_rows(scans),
         [
             Constraint::Length(10),
             Constraint::Length(22),
@@ -1295,6 +1294,26 @@ fn scans_widget(scans: &[ScanRecord]) -> TuiTable<'_> {
         .style(Style::default().add_modifier(Modifier::BOLD)),
     )
     .block(Block::default().title("Scan History").borders(Borders::ALL))
+}
+
+fn scan_history_rows(scans: &[ScanRecord]) -> Vec<Row<'_>> {
+    scans
+        .iter()
+        .take(TUI_SCAN_HISTORY_LIMIT)
+        .map(|scan| {
+            Row::new(vec![
+                short_id(&scan.id),
+                scan.status.clone(),
+                scan.inventory_count.to_string(),
+                scan.finding_count.to_string(),
+                scan.scanner_errors.len().to_string(),
+                scan.completed_at
+                    .or(Some(scan.started_at))
+                    .map(format_tui_time)
+                    .unwrap_or_else(|| "unknown".to_string()),
+            ])
+        })
+        .collect()
 }
 
 fn footer_widget(status: &str) -> Paragraph<'_> {
@@ -1757,5 +1776,26 @@ mod tests {
             tui_status_line("q quit | r run scan | R refresh", &progress),
             "q quit | r run scan | R refresh"
         );
+    }
+
+    #[test]
+    fn scan_history_widget_limits_rows_to_fit_fixed_panel() {
+        let now = Utc::now();
+        let scans = (0..5)
+            .map(|index| ScanRecord {
+                id: format!("scan-{index}"),
+                host: "test-host".to_string(),
+                started_at: now,
+                completed_at: Some(now),
+                status: "completed".to_string(),
+                inventory_count: index,
+                finding_count: index,
+                scanner_errors: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+
+        let rows = scan_history_rows(&scans);
+
+        assert_eq!(rows.len(), TUI_SCAN_HISTORY_LIMIT);
     }
 }
