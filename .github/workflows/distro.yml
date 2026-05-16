@@ -4,10 +4,10 @@ name: Distro
 # representative set of Linux distributions. Container jobs give us the real
 # distro userspace (glibc version, package manager binaries) on Ubuntu runners.
 #
-# These jobs intentionally do NOT duplicate format/clippy/unit-test checks
-# from ci.yml. They focus on:
+# These jobs intentionally do not duplicate format/clippy/unit-test checks from
+# ci.yml. They focus on:
 #   1. The binary compiling successfully against each distro's glibc.
-#   2. The package collector actually executing dpkg-query / rpm on real packages.
+#   2. The package collector executing dpkg-query / rpm against real packages.
 
 on:
   push:
@@ -27,7 +27,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # ── Debian / Ubuntu (dpkg) ──────────────────────────────────────
           - name: Ubuntu 24.04 (Noble)
             image: ubuntu:24.04
             family: debian
@@ -40,7 +39,6 @@ jobs:
             image: debian:12
             family: debian
 
-          # ── RPM-based ───────────────────────────────────────────────────
           - name: Fedora 41
             image: fedora:41
             family: rpm
@@ -58,24 +56,17 @@ jobs:
         if: matrix.family == 'debian'
         run: |
           apt-get update -qq
-          # ca-certificates is required by git for HTTPS checkout.
-          # curl is not needed — reqwest uses rustls (bundled TLS).
-          # jq is used by the smoke test to parse inventory JSON.
           apt-get install -y --no-install-recommends \
-            ca-certificates build-essential pkg-config libssl-dev git jq
+            ca-certificates curl build-essential pkg-config libssl-dev git jq
 
       - name: Install system dependencies (RPM)
         if: matrix.family == 'rpm'
         run: |
-          # curl-minimal is pre-installed and conflicts with the full curl package;
-          # we don't need curl because reqwest uses rustls (bundled TLS).
-          # ca-certificates is already present in all three images.
-          # jq is used by the smoke test to parse inventory JSON.
           dnf install -y \
-            gcc pkg-config \
+            curl-minimal gcc pkg-config \
             openssl-devel git findutils jq
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -90,21 +81,14 @@ jobs:
       - name: Unit tests
         run: cargo test --workspace --locked
 
-      # ── Live package collector smoke tests ─────────────────────────────
-      # These run the real binary against the actual package manager to confirm
-      # the collector works end-to-end on each distro. We just check that the
-      # binary exits cleanly and prints at least one package name to stdout.
-
-      - name: Smoke test — dpkg-query (Debian/Ubuntu)
+      - name: Smoke test dpkg-query (Debian/Ubuntu)
         if: matrix.family == 'debian'
         run: |
-          # RUST_LOG=off silences tracing output on stderr.
-          # Logs go to stderr (fixed in the binary), so stdout is clean JSON.
           COUNT=$(RUST_LOG=off ./target/release/norn inventory --output json | jq '[.[] | select(.kind == "package")] | length')
           echo "Found ${COUNT} packages from dpkg-query"
           [ "${COUNT}" -gt 0 ] || { echo "ERROR: expected at least one package"; exit 1; }
 
-      - name: Smoke test — rpm (RPM-based)
+      - name: Smoke test rpm (RPM-based)
         if: matrix.family == 'rpm'
         run: |
           COUNT=$(RUST_LOG=off ./target/release/norn inventory --output json | jq '[.[] | select(.kind == "package")] | length')
