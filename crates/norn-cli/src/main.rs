@@ -349,6 +349,15 @@ impl LocalScanRunner {
         self.db.insert_risks(&scan.id, &risks)?;
         storage_progress.finish_with_message("Stored scan results");
 
+        if let Err(error) = self.db.prune_old_scans(self.config.database.retention_days) {
+            warn!(error = %error, "failed to prune old scan data");
+        } else {
+            debug!(
+                retention_days = self.config.database.retention_days,
+                "pruned old scan data"
+            );
+        }
+
         for event in notification_batch.events {
             self.send_notification(&scan.id, event).await;
         }

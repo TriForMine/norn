@@ -72,6 +72,11 @@ impl NornConfig {
                 self.risk.max_notifications_per_scan = limit;
             }
         }
+        if let Ok(value) = env::var("NORN_RETENTION_DAYS") {
+            if let Ok(days) = value.parse::<u32>() {
+                self.database.retention_days = days;
+            }
+        }
     }
 }
 
@@ -95,12 +100,14 @@ impl Default for ServerConfig {
 #[serde(default)]
 pub struct DatabaseConfig {
     pub url: String,
+    pub retention_days: u32,
 }
 
 impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
             url: "sqlite:///var/lib/norn/norn.db".to_string(),
+            retention_days: 90,
         }
     }
 }
@@ -298,6 +305,7 @@ mod tests {
         env::set_var("NORN_SCANNER_PARALLELISM", "12");
         env::set_var("NORN_RISK_NOTIFY_MINIMUM", "Critical");
         env::set_var("NORN_RISK_MAX_NOTIFICATIONS_PER_SCAN", "7");
+        env::set_var("NORN_RETENTION_DAYS", "30");
         let cfg = NornConfig::load_from_str(
             r#"
             [server]
@@ -312,12 +320,14 @@ mod tests {
         env::remove_var("NORN_SCANNER_PARALLELISM");
         env::remove_var("NORN_RISK_NOTIFY_MINIMUM");
         env::remove_var("NORN_RISK_MAX_NOTIFICATIONS_PER_SCAN");
+        env::remove_var("NORN_RETENTION_DAYS");
 
         assert_eq!(cfg.server.bind, "127.0.0.1:9000");
         assert_eq!(cfg.database.url, "sqlite://./norn.db");
         assert_eq!(cfg.scanner.parallelism(), 12);
         assert_eq!(cfg.risk.notify_minimum, RiskLevel::Critical);
         assert_eq!(cfg.risk.max_notifications_per_scan, 7);
+        assert_eq!(cfg.database.retention_days, 30);
     }
 
     #[test]

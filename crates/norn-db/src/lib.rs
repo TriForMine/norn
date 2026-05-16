@@ -140,6 +140,18 @@ impl Database {
         Ok(())
     }
 
+    pub fn prune_old_scans(&self, retention_days: u32) -> Result<usize> {
+        if retention_days == 0 {
+            return Ok(0);
+        }
+        let cutoff = Utc::now() - chrono::Duration::days(retention_days as i64);
+        let deleted = self.conn.lock().expect("database mutex poisoned").execute(
+            "DELETE FROM scans WHERE started_at < ?1 AND status != 'running'",
+            params![cutoff.to_rfc3339()],
+        )?;
+        Ok(deleted)
+    }
+
     pub fn insert_inventory(&self, scan_id: &str, items: &[InventoryItem]) -> Result<()> {
         let mut conn = self.conn.lock().expect("database mutex poisoned");
         let tx = conn.transaction()?;
@@ -776,6 +788,87 @@ mod tests {
         assert_eq!(summary.running_containers, 1);
         assert_eq!(summary.public_services, 1);
         assert_eq!(summary.critical_risks, 1);
+        assert_eq!(db.list_scans().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn prune_old_scans_removes_old_completed_scans() {
+        let db = Database::open_memory().unwrap();
+
+        // Insert an old scan and finish it.
+        let old_scan = db.create_scan("test-host").unwrap();
+        db.finish_scan(&old_scan.id, "completed", 0, 0, &[])
+            .unwrap();
+        // Back-date the scan's started_at to 200 days ago so it falls outside the 90-day window.
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE scans SET started_at = ?2 WHERE id = ?1",
+                params![
+                    old_scan.id,
+                    (Utc::now() - chrono::Duration::days(200)).to_rfc3339(),
+                ],
+            )
+            .unwrap();
+
+        // Insert a recent scan and finish it.
+        let recent_scan = db.create_scan("test-host").unwrap();
+        db.finish_scan(&recent_scan.id, "completed", 0, 0, &[])
+            .unwrap();
+
+        // Pruning with retention_days = 90 should remove only the old scan.
+        let deleted = db.prune_old_scans(90).unwrap();
+        assert_eq!(deleted, 1);
+        let remaining = db.list_scans().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, recent_scan.id);
+    }
+
+    #[test]
+    fn prune_old_scans_retention_zero_keeps_everything() {
+        let db = Database::open_memory().unwrap();
+
+        let scan = db.create_scan("test-host").unwrap();
+        db.finish_scan(&scan.id, "completed", 0, 0, &[]).unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE scans SET started_at = ?2 WHERE id = ?1",
+                params![
+                    scan.id,
+                    (Utc::now() - chrono::Duration::days(500)).to_rfc3339(),
+                ],
+            )
+            .unwrap();
+
+        // retention_days = 0 means retain forever.
+        let deleted = db.prune_old_scans(0).unwrap();
+        assert_eq!(deleted, 0);
+        assert_eq!(db.list_scans().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn prune_old_scans_does_not_remove_running_scans() {
+        let db = Database::open_memory().unwrap();
+
+        // A running scan that is also old should NOT be pruned.
+        let running_scan = db.create_scan("test-host").unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE scans SET started_at = ?2 WHERE id = ?1",
+                params![
+                    running_scan.id,
+                    (Utc::now() - chrono::Duration::days(200)).to_rfc3339(),
+                ],
+            )
+            .unwrap();
+
+        let deleted = db.prune_old_scans(90).unwrap();
+        assert_eq!(deleted, 0);
         assert_eq!(db.list_scans().unwrap().len(), 1);
     }
 }

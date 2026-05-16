@@ -40,28 +40,58 @@ impl Collector for PackageCollector {
             return Ok(items);
         }
 
-        let output = Command::new("dpkg-query")
+        // Try dpkg-query first (Debian/Ubuntu).
+        match Command::new("dpkg-query")
             .args(["-W", "-f=${binary:Package}\t${Version}\t${Architecture}\n"])
             .output()
             .await
-            .context("failed to execute dpkg-query")?;
-        if !output.status.success() {
-            anyhow::bail!(
-                "dpkg-query failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
+        {
+            Ok(output) => {
+                if !output.status.success() {
+                    anyhow::bail!(
+                        "dpkg-query failed: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    );
+                }
+                let mut items = parse_dpkg_query(&String::from_utf8_lossy(&output.stdout));
+                items.push(host_item());
+                return Ok(items);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // dpkg-query not available — fall through to rpm.
+            }
+            Err(e) => return Err(e).context("failed to execute dpkg-query"),
         }
-        let mut items = parse_dpkg_query(&String::from_utf8_lossy(&output.stdout));
-        // Emit a single host-filesystem item so the scanner can run `dir:/`
-        // against the host and pick up all installed package vulnerabilities.
-        items.push(host_item());
-        Ok(items)
+
+        // Fall back to rpm (RHEL/Fedora/Rocky/Amazon Linux/etc.).
+        match Command::new("rpm")
+            .args(["-qa", "--queryformat", "%{NAME}\t%{VERSION}-%{RELEASE}\n"])
+            .output()
+            .await
+        {
+            Ok(output) => {
+                if !output.status.success() {
+                    anyhow::bail!(
+                        "rpm failed: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    );
+                }
+                let mut items = parse_rpm_query(&String::from_utf8_lossy(&output.stdout));
+                items.push(host_item());
+                Ok(items)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                anyhow::bail!(
+                    "neither dpkg-query nor rpm was found on PATH; \
+                     cannot collect installed packages on this system"
+                )
+            }
+            Err(e) => Err(e).context("failed to execute rpm"),
+        }
     }
 }
 
-/// A synthetic inventory item representing the host filesystem. This causes
-/// `scan_targets_from_inventory` to emit a `dir:/` scan target for Grype,
-/// which discovers vulnerabilities in all installed packages on the host.
+/// A synthetic inventory item representing the host filesystem.
 pub fn host_item() -> InventoryItem {
     let mut item = InventoryItem::new(
         "host:localhost",
@@ -80,6 +110,23 @@ pub fn parse_dpkg_list(input: &str) -> Vec<InventoryItem> {
 }
 
 pub fn parse_dpkg_query(input: &str) -> Vec<InventoryItem> {
+    input
+        .lines()
+        .filter_map(|line| {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            if fields.len() < 2 {
+                return None;
+            }
+            Some(package_item(fields[0], fields[1]))
+        })
+        .collect()
+}
+
+/// Parse the output of `rpm -qa --queryformat '%{NAME}\t%{VERSION}-%{RELEASE}\n'`.
+///
+/// Each non-empty line is expected to be tab-separated `name\tversion` and is
+/// turned into an [`InventoryItem`] with [`InventoryKind::Package`].
+pub fn parse_rpm_query(input: &str) -> Vec<InventoryItem> {
     input
         .lines()
         .filter_map(|line| {
@@ -123,11 +170,16 @@ fn package_item(name: &str, version: &str) -> InventoryItem {
 mod tests {
     use super::*;
 
-    const FIXTURE: &str = include_str!("../../../fixtures/packages/dpkg-status.txt");
+    const DPKG_FIXTURE: &str = include_str!("../../../fixtures/packages/dpkg-status.txt");
+    const RPM_FIXTURE: &str = include_str!("../../../fixtures/packages/rpm-query.txt");
+
+    // Keep the old name so nothing outside this module breaks.
+    #[allow(dead_code)]
+    const FIXTURE: &str = DPKG_FIXTURE;
 
     #[test]
     fn parses_installed_dpkg_packages() {
-        let packages = parse_dpkg_list(FIXTURE);
+        let packages = parse_dpkg_list(DPKG_FIXTURE);
 
         assert_eq!(packages.len(), 3);
         assert!(packages.iter().any(|package| {
@@ -141,7 +193,7 @@ mod tests {
 
     #[test]
     fn collect_includes_host_item() {
-        let mut items = parse_dpkg_list(FIXTURE);
+        let mut items = parse_dpkg_list(DPKG_FIXTURE);
         items.push(host_item());
 
         let host = items.iter().find(|i| i.kind == InventoryKind::Host);
@@ -149,5 +201,32 @@ mod tests {
         let host = host.unwrap();
         assert_eq!(host.id, "host:localhost");
         assert_eq!(host.source, InventorySource::Host);
+    }
+
+    #[test]
+    fn parses_installed_rpm_packages() {
+        let packages = parse_rpm_query(RPM_FIXTURE);
+
+        assert_eq!(packages.len(), 4);
+        assert!(packages.iter().any(|p| {
+            p.package_name.as_deref() == Some("openssl")
+                && p.package_version.as_deref() == Some("3.0.7-27.el9")
+        }));
+        assert!(packages.iter().any(|p| {
+            p.package_name.as_deref() == Some("openssl-libs")
+                && p.package_version.as_deref() == Some("3.0.7-27.el9")
+        }));
+        assert!(packages.iter().any(|p| {
+            p.package_name.as_deref() == Some("bash")
+                && p.package_version.as_deref() == Some("5.1.8-6.el9")
+        }));
+        assert!(packages.iter().any(|p| {
+            p.package_name.as_deref() == Some("nginx")
+                && p.package_version.as_deref() == Some("1.20.1-14.el9")
+        }));
+        // Every item must be tagged as an installed package.
+        assert!(packages
+            .iter()
+            .all(|p| p.kind == InventoryKind::Package && p.status == RuntimeStatus::Installed));
     }
 }

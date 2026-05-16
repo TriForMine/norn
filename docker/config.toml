@@ -4,6 +4,7 @@ static_dir = "/opt/norn/web"
 
 [database]
 url = "sqlite:///data/norn.db"
+retention_days = 90
 
 [scan]
 interval = "6h"
