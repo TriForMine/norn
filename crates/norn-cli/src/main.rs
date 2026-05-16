@@ -19,7 +19,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
-use norn_api::{serve, ApiState, ScanLock};
+use norn_api::{serve, ApiState, ScanLock, ScanProgressState};
 use norn_collector_docker::DockerCollector;
 use norn_collector_packages::PackageCollector;
 use norn_collector_ports::PortCollector;
@@ -152,16 +152,18 @@ async fn main() -> Result<()> {
             if let Some(jobs) = jobs {
                 config.scanner.parallelism = jobs;
             }
-            let runner = LocalScanRunner::new(config, db, host, notifier);
+            let runner = LocalScanRunner::new(config, db, host, notifier, None);
             let outcome = runner.run_scan_interactive(!no_progress).await?;
             print_scan_summary(&outcome);
         }
         Commands::Serve => {
+            let mut state = ApiState::new(db.clone());
             let runner = Arc::new(LocalScanRunner::new(
                 config.clone(),
                 db.clone(),
                 host,
                 notifier.clone(),
+                Some(state.scan_progress.clone()),
             ));
             if config.scan.run_on_start {
                 match runner.run_scan().await {
@@ -169,7 +171,6 @@ async fn main() -> Result<()> {
                     Err(error) => warn!(error = %error, "startup scan failed"),
                 }
             }
-            let mut state = ApiState::new(db);
             state.runner = Some(runner.clone());
             state.notifier = notifier;
             spawn_scheduler(
@@ -180,7 +181,7 @@ async fn main() -> Result<()> {
             serve(&config.server.bind, &config.server.static_dir, state).await?;
         }
         Commands::Tui => {
-            let runner = LocalScanRunner::new(config, db.clone(), host, notifier);
+            let runner = LocalScanRunner::new(config, db.clone(), host, notifier, None);
             run_tui(db, runner).await?;
         }
         Commands::Inventory { output } => {
@@ -245,6 +246,7 @@ struct LocalScanRunner {
     db: Database,
     host: String,
     notifier: Option<Arc<dyn Notifier>>,
+    scan_progress: Option<ScanProgressState>,
 }
 
 impl LocalScanRunner {
@@ -253,12 +255,14 @@ impl LocalScanRunner {
         db: Database,
         host: String,
         notifier: Option<Arc<dyn Notifier>>,
+        scan_progress: Option<ScanProgressState>,
     ) -> Self {
         Self {
             config,
             db,
             host,
             notifier,
+            scan_progress,
         }
     }
 }
@@ -279,13 +283,40 @@ impl LocalScanRunner {
     async fn run_scan_internal(&self, progress: ScanProgress) -> Result<ScanOutcome> {
         let scan = self.db.create_scan(&self.host)?;
         info!(scan_id = scan.id, host = self.host, "scan started");
+        if let Some(scan_progress) = &self.scan_progress {
+            scan_progress.start(scan.id.clone(), self.host.clone());
+        }
 
+        let outcome = self.run_scan_steps(scan, progress).await;
+        if outcome.is_err() {
+            if let Some(scan_progress) = &self.scan_progress {
+                scan_progress.finish("Scan failed");
+            }
+        }
+        outcome
+    }
+
+    async fn run_scan_steps(
+        &self,
+        scan: ScanRecord,
+        progress: ScanProgress,
+    ) -> Result<ScanOutcome> {
+        if let Some(scan_progress) = &self.scan_progress {
+            scan_progress.set_phase("collecting_inventory", "Collecting inventory", None);
+        }
         let registry = build_collectors(&self.config);
         let inventory_progress = progress.spinner("Collecting runtime inventory");
         let (inventory, mut errors) = registry.collect().await;
         inventory_progress
             .finish_with_message(format!("Collected {} inventory items", inventory.len()));
 
+        if let Some(scan_progress) = &self.scan_progress {
+            scan_progress.set_phase(
+                "preparing_targets",
+                "Preparing vulnerability targets",
+                Some(format!("Collected {} inventory items", inventory.len())),
+            );
+        }
         let targets = scan_targets_from_inventory_with_options(
             &inventory,
             ScanTargetOptions {
@@ -298,10 +329,18 @@ impl LocalScanRunner {
             &targets,
             self.config.scanner.parallelism(),
             &progress,
+            self.scan_progress.clone(),
         )
         .await;
         errors.extend(scanner_errors);
 
+        if let Some(scan_progress) = &self.scan_progress {
+            scan_progress.set_phase(
+                "evaluating_risk",
+                "Evaluating runtime risk",
+                Some(format!("Found {} vulnerability findings", findings.len())),
+            );
+        }
         let risk_progress = progress.spinner("Evaluating runtime risk");
         let inventory_by_id = inventory
             .iter()
@@ -324,6 +363,13 @@ impl LocalScanRunner {
         }
         risk_progress.finish_with_message(format!("Evaluated {} runtime risks", risks.len()));
 
+        if let Some(scan_progress) = &self.scan_progress {
+            scan_progress.set_phase(
+                "preparing_notifications",
+                "Preparing notifications",
+                Some(format!("Evaluated {} runtime risks", risks.len())),
+            );
+        }
         let notification_progress = progress.spinner("Preparing notifications");
         let notification_batch = if self.notifier.is_some() {
             self.prepare_notification_batch(&inventory_by_id, &risks, &inventory)?
@@ -349,6 +395,9 @@ impl LocalScanRunner {
             notification_progress.finish_with_message("Skipped notifications (notifier disabled)");
         }
 
+        if let Some(scan_progress) = &self.scan_progress {
+            scan_progress.set_phase("storing_results", "Storing scan results", None);
+        }
         let storage_progress = progress.spinner("Storing scan results");
         self.db.insert_inventory(&scan.id, &inventory)?;
         self.db.insert_findings(&scan.id, &findings)?;
@@ -375,6 +424,9 @@ impl LocalScanRunner {
         };
         self.db
             .finish_scan(&scan.id, status, inventory.len(), findings.len(), &errors)?;
+        if let Some(scan_progress) = &self.scan_progress {
+            scan_progress.finish("Scan complete");
+        }
         let summary = self.db.summary()?;
         let completed = self
             .db
@@ -634,6 +686,7 @@ async fn scan_targets_with_progress(
     targets: &[ScanTarget],
     parallelism: usize,
     progress: &ScanProgress,
+    api_progress: Option<ScanProgressState>,
 ) -> (Vec<VulnerabilityFinding>, Vec<ScannerError>) {
     let mut findings = Vec::new();
     let mut errors = Vec::new();
@@ -655,6 +708,9 @@ async fn scan_targets_with_progress(
             "Scanning vulnerability targets ({parallelism} jobs, {duplicate_checks} duplicates skipped)"
         ),
     );
+    if let Some(api_progress) = &api_progress {
+        api_progress.set_vulnerability_scan(total, parallelism);
+    }
 
     if total == 0 {
         scan_progress.finish_with_message("No vulnerability targets");
@@ -676,6 +732,7 @@ async fn scan_targets_with_progress(
             let target_count = group.targets.len();
             let targets = group.targets.clone();
             let scan_progress = scan_progress.clone();
+            let api_progress = api_progress.clone();
             tasks.spawn(async move {
                 let _permit = permit;
                 let scanner_name = scanner.name();
@@ -683,6 +740,9 @@ async fn scan_targets_with_progress(
                     "Scanning {} with {} ({target_count} containers)",
                     target.name, scanner_name
                 ));
+                if let Some(api_progress) = &api_progress {
+                    api_progress.target_started(format!("{} ({scanner_name})", target.name));
+                }
                 debug!(
                     scanner = scanner_name,
                     target = %target.reference,
@@ -712,6 +772,9 @@ async fn scan_targets_with_progress(
                     }
                 };
                 scan_progress.inc(1);
+                if let Some(api_progress) = &api_progress {
+                    api_progress.target_completed();
+                }
                 result
             });
         }

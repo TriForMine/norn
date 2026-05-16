@@ -19,6 +19,7 @@ import { VulnerabilitiesTable } from "./components/VulnerabilitiesTable";
 import { api } from "./lib/api";
 import type {
   ScanRecord,
+  ScanStatus,
   ServiceSummary,
   Summary,
   VulnerabilitySummary,
@@ -59,6 +60,7 @@ export function App() {
   const [status, setStatus] = useState<string | null>(null);
   const [scanRunning, setScanRunning] = useState(false);
   const [scanElapsed, setScanElapsed] = useState(0);
+  const [scanStatus, setScanStatus] = useState<ScanStatus | null>(null);
   const scanStartRef = useRef<number | null>(null);
 
   const refresh = useCallback(async () => {
@@ -89,17 +91,22 @@ export function App() {
 
     const poll = async () => {
       try {
-        const { running } = await api.scanStatus();
+        const nextStatus = await api.scanStatus();
+        const { running } = nextStatus;
+        setScanStatus(nextStatus);
         setScanRunning(running);
 
         if (running && !wasRunning) {
           // scan just started (externally, e.g. scheduler)
-          scanStartRef.current = Date.now();
+          scanStartRef.current = nextStatus.started_at
+            ? new Date(nextStatus.started_at).getTime()
+            : Date.now();
         }
         if (!running && wasRunning) {
           // scan just finished — refresh data
           setScanElapsed(0);
           scanStartRef.current = null;
+          setScanStatus(null);
           await refresh();
         }
         wasRunning = running;
@@ -130,6 +137,14 @@ export function App() {
 
   async function runScan() {
     setScanRunning(true);
+    setScanStatus({
+      running: true,
+      phase: "starting",
+      phase_label: "Starting scan",
+      completed_target_checks: 0,
+      total_target_checks: 0,
+      parallelism: 0,
+    });
     scanStartRef.current = Date.now();
     setScanElapsed(0);
     setStatus(null);
@@ -141,10 +156,19 @@ export function App() {
       setStatus(error instanceof Error ? error.message : "Scan failed");
     } finally {
       setScanRunning(false);
+      setScanStatus(null);
       scanStartRef.current = null;
       setScanElapsed(0);
     }
   }
+
+  const scanPercent =
+    scanStatus && scanStatus.total_target_checks > 0
+      ? Math.round(
+          (scanStatus.completed_target_checks / scanStatus.total_target_checks) *
+            100,
+        )
+      : null;
 
   const nav = useMemo(
     () => [
@@ -198,20 +222,44 @@ export function App() {
 
       {scanRunning ? (
         <div className="border-b border-amber-200 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/40">
-          <div className="mx-auto flex max-w-7xl items-center gap-3 px-4 py-2 lg:px-6">
+          <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-3 px-4 py-2 lg:px-6">
             <Loader2
               className="h-4 w-4 shrink-0 animate-spin text-amber-600 dark:text-amber-400"
               aria-hidden="true"
             />
             <p className="text-sm font-medium text-amber-800 dark:text-amber-300">
-              Scan in progress
+              {scanStatus?.phase_label ?? "Scan in progress"}
               {scanElapsed > 0
-                ? ` — ${Math.floor(scanElapsed / 60)}m ${scanElapsed % 60}s elapsed`
+                ? ` - ${Math.floor(scanElapsed / 60)}m ${scanElapsed % 60}s elapsed`
                 : ""}
             </p>
-            <p className="text-sm text-amber-600 dark:text-amber-500">
-              Dashboard will refresh automatically when complete.
-            </p>
+            {scanPercent !== null ? (
+              <div className="flex min-w-52 items-center gap-2">
+                <div className="h-2 w-32 overflow-hidden rounded bg-amber-200 dark:bg-amber-900">
+                  <div
+                    className="h-full bg-amber-600 dark:bg-amber-400"
+                    style={{ width: `${scanPercent}%` }}
+                  />
+                </div>
+                <span className="text-xs font-semibold text-amber-700 dark:text-amber-300">
+                  {scanStatus?.completed_target_checks ?? 0}/
+                  {scanStatus?.total_target_checks ?? 0}
+                </span>
+              </div>
+            ) : null}
+            {scanStatus?.current_target ? (
+              <p className="max-w-xl truncate text-sm text-amber-600 dark:text-amber-500">
+                {scanStatus.current_target}
+              </p>
+            ) : scanStatus?.message ? (
+              <p className="max-w-xl truncate text-sm text-amber-600 dark:text-amber-500">
+                {scanStatus.message}
+              </p>
+            ) : (
+              <p className="text-sm text-amber-600 dark:text-amber-500">
+                Dashboard will refresh automatically when complete.
+              </p>
+            )}
           </div>
         </div>
       ) : null}

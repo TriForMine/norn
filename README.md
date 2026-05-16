@@ -98,6 +98,7 @@ norn ignore CVE-2026-0001 --service nginx --days 30 --config /etc/norn/config.to
 - `GET /api/services`
 - `GET /api/vulnerabilities` accepts optional `?limit=500` style caps for dashboard-sized responses
 - `GET /api/scans`
+- `GET /api/scans/status` returns `running` plus current scan phase, target counters, and active target
 - `POST /api/scans/run`
 - `POST /api/ignore`
 - `POST /api/notifications/test`

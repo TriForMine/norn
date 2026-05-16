@@ -51,6 +51,16 @@ export interface VulnerabilitySummary {
 
 export interface ScanStatus {
   running: boolean;
+  phase: string;
+  phase_label: string;
+  scan_id?: string | null;
+  host?: string | null;
+  started_at?: string | null;
+  completed_target_checks: number;
+  total_target_checks: number;
+  current_target?: string | null;
+  parallelism: number;
+  message?: string | null;
 }
 
 export interface ScanRecord {

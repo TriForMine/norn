@@ -1,4 +1,8 @@
-use std::{net::SocketAddr, path::Path, sync::Arc};
+use std::{
+    net::SocketAddr,
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
 pub type ScanLock = Arc<tokio::sync::Mutex<()>>;
 
@@ -19,12 +23,123 @@ use serde_json::json;
 use tokio::net::TcpListener;
 use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ScanStatusSnapshot {
+    pub running: bool,
+    pub phase: String,
+    pub phase_label: String,
+    pub scan_id: Option<String>,
+    pub host: Option<String>,
+    pub started_at: Option<chrono::DateTime<Utc>>,
+    pub completed_target_checks: u64,
+    pub total_target_checks: u64,
+    pub current_target: Option<String>,
+    pub parallelism: usize,
+    pub message: Option<String>,
+}
+
+impl Default for ScanStatusSnapshot {
+    fn default() -> Self {
+        Self {
+            running: false,
+            phase: "idle".to_string(),
+            phase_label: "Idle".to_string(),
+            scan_id: None,
+            host: None,
+            started_at: None,
+            completed_target_checks: 0,
+            total_target_checks: 0,
+            current_target: None,
+            parallelism: 0,
+            message: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ScanProgressState {
+    inner: Arc<Mutex<ScanStatusSnapshot>>,
+}
+
+impl ScanProgressState {
+    pub fn snapshot(&self) -> ScanStatusSnapshot {
+        self.inner
+            .lock()
+            .expect("scan progress mutex poisoned")
+            .clone()
+    }
+
+    pub fn start(&self, scan_id: impl Into<String>, host: impl Into<String>) {
+        let mut status = self.inner.lock().expect("scan progress mutex poisoned");
+        *status = ScanStatusSnapshot {
+            running: true,
+            phase: "starting".to_string(),
+            phase_label: "Starting scan".to_string(),
+            scan_id: Some(scan_id.into()),
+            host: Some(host.into()),
+            started_at: Some(Utc::now()),
+            completed_target_checks: 0,
+            total_target_checks: 0,
+            current_target: None,
+            parallelism: 0,
+            message: None,
+        };
+    }
+
+    pub fn set_phase(
+        &self,
+        phase: impl Into<String>,
+        phase_label: impl Into<String>,
+        message: Option<String>,
+    ) {
+        let mut status = self.inner.lock().expect("scan progress mutex poisoned");
+        status.phase = phase.into();
+        status.phase_label = phase_label.into();
+        status.message = message;
+        status.current_target = None;
+    }
+
+    pub fn set_vulnerability_scan(&self, total_target_checks: u64, parallelism: usize) {
+        let mut status = self.inner.lock().expect("scan progress mutex poisoned");
+        status.phase = "scanning_vulnerabilities".to_string();
+        status.phase_label = "Scanning vulnerabilities".to_string();
+        status.completed_target_checks = 0;
+        status.total_target_checks = total_target_checks;
+        status.current_target = None;
+        status.parallelism = parallelism;
+        status.message = None;
+    }
+
+    pub fn target_started(&self, target: impl Into<String>) {
+        let mut status = self.inner.lock().expect("scan progress mutex poisoned");
+        status.current_target = Some(target.into());
+    }
+
+    pub fn target_completed(&self) {
+        let mut status = self.inner.lock().expect("scan progress mutex poisoned");
+        status.completed_target_checks = status
+            .completed_target_checks
+            .saturating_add(1)
+            .min(status.total_target_checks);
+    }
+
+    pub fn finish(&self, phase_label: impl Into<String>) {
+        let mut status = self.inner.lock().expect("scan progress mutex poisoned");
+        status.running = false;
+        status.phase = "idle".to_string();
+        status.phase_label = phase_label.into();
+        status.current_target = None;
+        status.message = None;
+    }
+}
+
 #[derive(Clone)]
 pub struct ApiState {
     pub db: Database,
     pub runner: Option<Arc<dyn ScanRunner>>,
     pub notifier: Option<Arc<dyn Notifier>>,
     pub scan_lock: ScanLock,
+    pub scan_progress: ScanProgressState,
 }
 
 impl ApiState {
@@ -34,6 +149,7 @@ impl ApiState {
             runner: None,
             notifier: None,
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
+            scan_progress: ScanProgressState::default(),
         }
     }
 }
@@ -121,7 +237,9 @@ async fn scans(State(state): State<ApiState>) -> ApiResult<Json<serde_json::Valu
 
 async fn scan_status(State(state): State<ApiState>) -> Json<serde_json::Value> {
     let running = state.scan_lock.try_lock().is_err();
-    Json(json!({ "running": running }))
+    let mut status = state.scan_progress.snapshot();
+    status.running = running;
+    Json(json!(status))
 }
 
 async fn run_scan(State(state): State<ApiState>) -> ApiResult<Json<serde_json::Value>> {
