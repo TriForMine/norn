@@ -1,6 +1,7 @@
 use std::{
     cmp::Reverse,
     collections::{HashMap, HashSet},
+    fs,
     io::{self, Stdout},
     path::PathBuf,
     sync::Arc,
@@ -77,8 +78,15 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
         output: OutputFormat,
     },
-    /// Print a markdown report for the latest stored scan.
-    Report,
+    /// Export a report for a stored scan.
+    Report {
+        #[arg(long, value_enum, default_value_t = ReportFormat::Markdown)]
+        format: ReportFormat,
+        #[arg(long, default_value = "latest")]
+        scan: String,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
     /// Send notification commands.
     Notify {
         #[command(subcommand)]
@@ -108,6 +116,12 @@ enum OutputFormat {
     Table,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ReportFormat {
+    Json,
+    Markdown,
+}
+
 const TUI_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const TUI_VULNERABILITY_LIMIT: usize = 200;
 
@@ -115,6 +129,15 @@ const TUI_VULNERABILITY_LIMIT: usize = 200;
 struct NotificationBatch {
     events: Vec<NotificationEvent>,
     suppressed: usize,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ReportDocument {
+    generated_at: DateTime<Utc>,
+    scan: Option<ScanRecord>,
+    summary: Summary,
+    services: Vec<ServiceSummary>,
+    vulnerabilities: Vec<VulnerabilitySummary>,
 }
 
 fn parse_positive_usize(value: &str) -> std::result::Result<usize, String> {
@@ -197,7 +220,11 @@ async fn main() -> Result<()> {
             }
             print_inventory(&items, output)?;
         }
-        Commands::Report => print_report(&db)?,
+        Commands::Report {
+            format,
+            scan,
+            output,
+        } => write_report(&db, format, &scan, output.as_ref())?,
         Commands::Notify {
             command: NotifyCommand::Test,
         } => {
@@ -1280,75 +1307,145 @@ fn print_inventory(items: &[InventoryItem], output: OutputFormat) -> Result<()> 
     Ok(())
 }
 
-fn print_report(db: &Database) -> Result<()> {
-    let scans = db.list_scans()?;
-    let Some(scan) = scans.first() else {
-        println!("# Norn Runtime Security Report\n\nNo scans have been stored yet.");
-        return Ok(());
+fn write_report(
+    db: &Database,
+    format: ReportFormat,
+    scan_selector: &str,
+    output: Option<&PathBuf>,
+) -> Result<()> {
+    let report = build_report(db, scan_selector)?;
+    let rendered = match format {
+        ReportFormat::Json => serde_json::to_string_pretty(&report)?,
+        ReportFormat::Markdown => render_markdown_report(&report),
     };
-    let vulnerabilities = db.vulnerability_summaries()?;
-    let summary = db.summary()?;
-
-    println!("# Norn Runtime Security Report");
-    println!();
-    println!("Generated at: {}", Utc::now().to_rfc3339());
-    println!("Host: {}", scan.host);
-    println!();
-    println!("## Summary");
-    println!();
-    println!("- Running containers: {}", summary.running_containers);
-    println!("- Active services: {}", summary.running_services);
-    println!("- Listening ports: {}", summary.listening_ports);
-    println!(
-        "- Publicly bound inventory items: {}",
-        summary.public_services
-    );
-    println!("- Critical runtime risks: {}", summary.critical_risks);
-    println!("- High runtime risks: {}", summary.high_risks);
-    println!("- Medium runtime risks: {}", summary.medium_risks);
-    println!("- Low runtime risks: {}", summary.low_risks);
-    println!(
-        "- Informational runtime risks: {}",
-        summary.informational_risks
-    );
-    println!();
-    println!("## Urgent");
-    print_report_group(
-        vulnerabilities
-            .iter()
-            .filter(|finding| finding.runtime_risk == RiskLevel::Critical),
-    );
-    println!();
-    println!("## Important");
-    print_report_group(
-        vulnerabilities
-            .iter()
-            .filter(|finding| finding.runtime_risk == RiskLevel::High),
-    );
-    println!();
-    println!("## Low priority");
-    print_report_group(
-        vulnerabilities
-            .iter()
-            .filter(|finding| !finding.runtime_risk.at_least(RiskLevel::High)),
-    );
+    if let Some(path) = output {
+        fs::write(path, rendered)
+            .with_context(|| format!("failed to write report {}", path.display()))?;
+    } else {
+        println!("{rendered}");
+    }
     Ok(())
 }
 
-fn print_report_group<'a>(items: impl Iterator<Item = &'a norn_core::VulnerabilitySummary>) {
+fn build_report(db: &Database, scan_selector: &str) -> Result<ReportDocument> {
+    let scan = if scan_selector == "latest" {
+        db.list_scans()?.into_iter().next()
+    } else {
+        Some(db.scan_by_id(scan_selector)?)
+    };
+    let Some(scan) = scan else {
+        return Ok(ReportDocument {
+            generated_at: Utc::now(),
+            scan: None,
+            summary: Summary::default(),
+            services: Vec::new(),
+            vulnerabilities: Vec::new(),
+        });
+    };
+    Ok(ReportDocument {
+        generated_at: Utc::now(),
+        summary: db.summary_for_scan(&scan.id)?,
+        services: db.service_summaries_for_scan(&scan.id)?,
+        vulnerabilities: db.vulnerability_summaries_for_scan(&scan.id)?,
+        scan: Some(scan),
+    })
+}
+
+fn render_markdown_report(report: &ReportDocument) -> String {
+    let Some(scan) = &report.scan else {
+        return "# Norn Runtime Security Report\n\nNo scans have been stored yet.\n".to_string();
+    };
+    let mut output = String::new();
+    output.push_str("# Norn Runtime Security Report\n\n");
+    output.push_str(&format!(
+        "Generated at: {}\n",
+        report.generated_at.to_rfc3339()
+    ));
+    output.push_str(&format!("Scan: `{}`\n", scan.id));
+    output.push_str(&format!("Host: {}\n", scan.host));
+    output.push_str(&format!("Status: {}\n\n", scan.status));
+    output.push_str("## Summary\n\n");
+    output.push_str(&format!(
+        "- Running containers: {}\n",
+        report.summary.running_containers
+    ));
+    output.push_str(&format!(
+        "- Active services: {}\n",
+        report.summary.running_services
+    ));
+    output.push_str(&format!(
+        "- Listening ports: {}\n",
+        report.summary.listening_ports
+    ));
+    output.push_str(&format!(
+        "- Publicly bound inventory items: {}\n",
+        report.summary.public_services
+    ));
+    output.push_str(&format!(
+        "- Critical runtime risks: {}\n",
+        report.summary.critical_risks
+    ));
+    output.push_str(&format!(
+        "- High runtime risks: {}\n",
+        report.summary.high_risks
+    ));
+    output.push_str(&format!(
+        "- Medium runtime risks: {}\n",
+        report.summary.medium_risks
+    ));
+    output.push_str(&format!(
+        "- Low runtime risks: {}\n",
+        report.summary.low_risks
+    ));
+    output.push_str(&format!(
+        "- Informational runtime risks: {}\n\n",
+        report.summary.informational_risks
+    ));
+    output.push_str("## Urgent\n\n");
+    push_report_group(
+        &mut output,
+        report
+            .vulnerabilities
+            .iter()
+            .filter(|finding| finding.runtime_risk == RiskLevel::Critical),
+    );
+    output.push_str("\n## Important\n\n");
+    push_report_group(
+        &mut output,
+        report
+            .vulnerabilities
+            .iter()
+            .filter(|finding| finding.runtime_risk == RiskLevel::High),
+    );
+    output.push_str("\n## Low priority\n\n");
+    push_report_group(
+        &mut output,
+        report
+            .vulnerabilities
+            .iter()
+            .filter(|finding| !finding.runtime_risk.at_least(RiskLevel::High)),
+    );
+    output
+}
+
+fn push_report_group<'a>(
+    output: &mut String,
+    items: impl Iterator<Item = &'a norn_core::VulnerabilitySummary>,
+) {
     let mut printed = false;
     for item in items {
         printed = true;
-        println!(
+        output.push_str(&format!(
             "- **{}** on `{}`: {} risk, {} exposure, fix {:?}",
             item.vulnerability_id,
             item.affected_service,
             item.runtime_risk.as_str(),
             item.exposed,
-            item.fix_available
-        );
+            item.fix_available,
+        ));
+        output.push('\n');
     }
     if !printed {
-        println!("- None");
+        output.push_str("- None\n");
     }
 }

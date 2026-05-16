@@ -357,7 +357,11 @@ impl Database {
         let Some(scan_id) = self.latest_scan_id()? else {
             return Ok(Summary::default());
         };
-        let scan = self.scan_by_id(&scan_id)?;
+        self.summary_for_scan(&scan_id)
+    }
+
+    pub fn summary_for_scan(&self, scan_id: &str) -> Result<Summary> {
+        let scan = self.scan_by_id(scan_id)?;
         let conn = self.conn.lock().expect("database mutex poisoned");
         let mut summary = Summary {
             last_scan_time: scan.completed_at.or(Some(scan.started_at)),
@@ -433,6 +437,10 @@ impl Database {
         let Some(scan_id) = self.latest_scan_id()? else {
             return Ok(Vec::new());
         };
+        self.service_summaries_for_scan(&scan_id)
+    }
+
+    pub fn service_summaries_for_scan(&self, scan_id: &str) -> Result<Vec<ServiceSummary>> {
         let conn = self.conn.lock().expect("database mutex poisoned");
         let mut stmt = conn.prepare(
             r#"
@@ -477,23 +485,34 @@ impl Database {
     }
 
     pub fn vulnerability_summaries(&self) -> Result<Vec<VulnerabilitySummary>> {
-        self.vulnerability_summaries_with_limit(None)
+        let Some(scan_id) = self.latest_scan_id()? else {
+            return Ok(Vec::new());
+        };
+        self.vulnerability_summaries_for_scan_with_limit(&scan_id, None)
     }
 
     pub fn vulnerability_summaries_limited(
         &self,
         limit: usize,
     ) -> Result<Vec<VulnerabilitySummary>> {
-        self.vulnerability_summaries_with_limit(Some(limit))
-    }
-
-    fn vulnerability_summaries_with_limit(
-        &self,
-        limit: Option<usize>,
-    ) -> Result<Vec<VulnerabilitySummary>> {
         let Some(scan_id) = self.latest_scan_id()? else {
             return Ok(Vec::new());
         };
+        self.vulnerability_summaries_for_scan_with_limit(&scan_id, Some(limit))
+    }
+
+    pub fn vulnerability_summaries_for_scan(
+        &self,
+        scan_id: &str,
+    ) -> Result<Vec<VulnerabilitySummary>> {
+        self.vulnerability_summaries_for_scan_with_limit(scan_id, None)
+    }
+
+    fn vulnerability_summaries_for_scan_with_limit(
+        &self,
+        scan_id: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<VulnerabilitySummary>> {
         let conn = self.conn.lock().expect("database mutex poisoned");
         let base_query = r#"
             WITH ranked AS (
@@ -574,7 +593,7 @@ impl Database {
             .context("failed to load latest scan id")
     }
 
-    fn scan_by_id(&self, scan_id: &str) -> Result<ScanRecord> {
+    pub fn scan_by_id(&self, scan_id: &str) -> Result<ScanRecord> {
         self.conn
             .lock()
             .expect("database mutex poisoned")

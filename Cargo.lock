@@ -1221,6 +1221,7 @@ dependencies = [
  "norn-risk",
  "norn-scanner-grype",
  "ratatui",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",
