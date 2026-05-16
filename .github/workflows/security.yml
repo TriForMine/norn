@@ -12,11 +12,40 @@ permissions:
   contents: read
 
 jobs:
+  norn-sarif:
+    name: Norn SARIF export
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Generate fixture scan
+        env:
+          NORN_DATABASE_URL: sqlite://./target/norn-security.db
+        run: cargo run -p norn-cli -- scan --config ./examples/config.toml --no-progress
+
+      - name: Export SARIF
+        env:
+          NORN_DATABASE_URL: sqlite://./target/norn-security.db
+        run: cargo run -p norn-cli -- report --config ./examples/config.toml --format sarif --output target/norn.sarif
+
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: target/norn.sarif
+
   rust-security:
     name: Rust dependency checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -46,5 +75,5 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/dependency-review-action@v4
